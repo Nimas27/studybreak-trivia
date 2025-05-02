@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const { generateTriviaQuestions } = require('./aiTrivia');
 require('dotenv').config();
 
 const app = express();
@@ -26,8 +27,8 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
   
   // Create a new room
-  socket.on('create-room', (data, callback) => {
-    const roomId = uuidv4().substring(0, 6).toUpperCase(); // Short room code
+  socket.on('create-room', async (data, callback) => {
+    const roomId = generateRoomId();
     
     const user = {
       id: socket.id,
@@ -45,6 +46,7 @@ io.on('connection', (socket) => {
       currentMode: 'study',
       timerRunning: false,
       timerValue: data.settings.studyTime,
+      triviaCategory: data.triviaCategory || 'General Knowledge', 
       triviaQuestions: [],
       currentQuestionIndex: -1,
       timerInterval: null
@@ -53,39 +55,37 @@ io.on('connection', (socket) => {
     activeRooms[roomId] = room;
     socket.join(roomId);
     
-    // Load default trivia questions
-    loadDefaultTriviaQuestions(roomId, data.settings.triviaCategory);
-    
+    // We'll load questions when trivia mode starts instead of immediately
     callback(roomId);
   });
   
   // Join an existing room
-socket.on('join-room', (data, callback) => {
-  console.log("Join room request received:", data);
-  
-  const { roomId, user } = data;
-  const room = activeRooms[roomId];
-  
-  if (!room) {
-    console.log("Room not found:", roomId);
-    callback(false);
-    return;
-  }
-  
-  const newUser = {
-    id: socket.id,
-    username: user.username,
-    isHost: false,
-    score: 0
-  };
-  
-  console.log("Adding user to room:", newUser);
-  room.participants.push(newUser);
-  socket.join(roomId);
-  
-  io.to(roomId).emit('room-updated', room);
-  callback(true);
-});
+  socket.on('join-room', (data, callback) => {
+    console.log("Join room request received:", data);
+    
+    const { roomId, user } = data;
+    const room = activeRooms[roomId];
+    
+    if (!room) {
+      console.log("Room not found:", roomId);
+      callback(false);
+      return;
+    }
+    
+    const newUser = {
+      id: socket.id,
+      username: user.username,
+      isHost: false,
+      score: 0
+    };
+    
+    console.log("Adding user to room:", newUser);
+    room.participants.push(newUser);
+    socket.join(roomId);
+    
+    io.to(roomId).emit('room-updated', room);
+    callback(true);
+  });
   
   // Get room data
   socket.on('get-room', (roomId, callback) => {
@@ -242,9 +242,7 @@ socket.on('join-room', (data, callback) => {
     }
   });
   
-// In server.js, improve the error handling in the disconnect event
-
-// Handle disconnections
+  // Handle disconnections
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
     
@@ -290,13 +288,64 @@ socket.on('join-room', (data, callback) => {
   });
 });
 
-// Trivia Question Functions
-// Get default trivia questions
-function loadDefaultTriviaQuestions(roomId, category) {
+// Helper function to generate room ID
+function generateRoomId() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+// Start a trivia session
+async function startTriviaSession(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
   
-  room.triviaQuestions = getPredefinedTriviaQuestions(category);
+  room.currentQuestionIndex = -1;
+  
+  // Reset all participants' scores for this session
+  room.participants.forEach(p => {
+    p.score = 0;
+  });
+  
+  // Send score reset to clients
+  io.to(roomId).emit('score-update', room.participants.map(p => ({
+    userId: p.id,
+    username: p.username,
+    score: p.score
+  })));
+  
+  // Notify clients that we're loading questions
+  io.to(roomId).emit('trivia-loading', true);
+  
+  // Generate or load trivia questions based on the category
+  try {
+    console.log(`Generating trivia for category: ${room.triviaCategory}`);
+    // Use AI to generate questions
+    room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5);
+    
+    // Notify clients that questions are ready
+    io.to(roomId).emit('trivia-loading', false);
+    
+    // Start the first question after a short delay
+    setTimeout(() => {
+      nextTriviaQuestion(roomId);
+    }, 2000);
+  } catch (error) {
+    console.error("Error generating trivia questions:", error);
+    
+    // Fallback to predefined questions if AI generation fails
+    room.triviaQuestions = getPredefinedTriviaQuestions('general');
+    
+    io.to(roomId).emit('trivia-loading', false);
+    
+    // Start with predefined questions
+    setTimeout(() => {
+      nextTriviaQuestion(roomId);
+    }, 2000);
+  }
 }
 
 // Get questions from predefined sets
@@ -382,31 +431,6 @@ function getPredefinedTriviaQuestions(category, count = 5) {
   
   // Return requested number of questions
   return questions.slice(0, count);
-}
-
-// Start a trivia session
-function startTriviaSession(roomId) {
-  const room = activeRooms[roomId];
-  if (!room) return;
-  
-  room.currentQuestionIndex = -1;
-  
-  // Reset all participants' scores for this session
-  room.participants.forEach(p => {
-    p.score = 0;
-  });
-  
-  // Send score reset to clients
-  io.to(roomId).emit('score-update', room.participants.map(p => ({
-    userId: p.id,
-    username: p.username,
-    score: p.score
-  })));
-  
-  // Start the first question after a short delay
-  setTimeout(() => {
-    nextTriviaQuestion(roomId);
-  }, 2000);
 }
 
 // Display the next trivia question
