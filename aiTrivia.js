@@ -11,11 +11,12 @@ const openai = new OpenAI({
  * Generate trivia questions using OpenAI
  * @param {string} topic - The topic for trivia questions
  * @param {number} count - Number of questions to generate
+ * @param {string} difficulty - Difficulty level (easy, medium, hard)
  * @returns {Array} - Array of question objects
  */
-async function generateTriviaQuestions(topic, count = 5) {
+async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') {
   try {
-    console.log(`Generating ${count} trivia questions on topic: ${topic}`);
+    console.log(`Generating ${count} ${difficulty} trivia questions on topic: ${topic}`);
     
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
@@ -26,7 +27,9 @@ async function generateTriviaQuestions(topic, count = 5) {
         },
         {
           role: "user",
-          content: `Generate ${count} multiple-choice trivia questions about ${topic}. 
+          content: `Generate ${count} ${difficulty}-level multiple-choice trivia questions about ${topic}. 
+                   For easy questions, use common knowledge. For medium questions, include some specific details.
+                   For hard questions, include obscure facts and challenging content.
                    Each question should have 4 options with only one correct answer.
                    Format your response as a JSON object with a 'questions' field containing an array of question objects.
                    Each question object should have these fields:
@@ -34,7 +37,7 @@ async function generateTriviaQuestions(topic, count = 5) {
                    - text: the question text
                    - options: array of 4 possible answers as strings
                    - correctIndex: index of the correct answer (0-3)
-                   - timeLimit: time limit in seconds (15)`
+                   - timeLimit: time limit in seconds (10)`
         }
       ],
       response_format: { type: "json_object" }
@@ -83,62 +86,148 @@ async function generateTriviaQuestions(topic, count = 5) {
     
     console.log("Successfully found questions array with length:", data.questions.length);
     
-    // Add UUID to each question
+    // Add UUID to each question and ensure timeLimit is 10 seconds
     const questionsWithUuid = data.questions.map(question => ({
       ...question,
-      id: uuidv4() // Replace the numeric id with a UUID
+      id: uuidv4(), // Replace the numeric id with a UUID
+      timeLimit: 10 // Ensure timeLimit is 10 seconds
     }));
     
     return questionsWithUuid;
   } catch (error) {
     console.error("Error generating trivia questions:", error);
     // Return fallback questions in case of error
-    return getFallbackTriviaQuestions();
+    return getFallbackTriviaQuestions(difficulty);
   }
 }
 
 /**
  * Fallback questions in case AI generation fails
+ * @param {string} difficulty - Difficulty level (easy, medium, hard)
  * @returns {Array} - Array of fallback question objects
  */
-function getFallbackTriviaQuestions() {
-  return [
+function getFallbackTriviaQuestions(difficulty = 'medium') {
+  // Easy questions
+  const easyQuestions = [
     {
       id: uuidv4(),
-      text: "What NBA player is known as 'King James'?",
-      options: ["Kevin Durant", "LeBron James", "Stephen Curry", "Michael Jordan"],
-      correctIndex: 1,
-      timeLimit: 15
-    },
-    {
-      id: uuidv4(),
-      text: "Which NBA team has won the most championships?",
-      options: ["Los Angeles Lakers", "Boston Celtics", "Chicago Bulls", "Golden State Warriors"],
-      correctIndex: 1,
-      timeLimit: 15
-    },
-    {
-      id: uuidv4(),
-      text: "Who holds the NBA record for most points scored in a single game?",
-      options: ["Michael Jordan", "Kobe Bryant", "Wilt Chamberlain", "LeBron James"],
+      text: "What is the capital of France?",
+      options: ["Berlin", "London", "Paris", "Madrid"],
       correctIndex: 2,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
-      text: "Which player has won the most NBA MVP awards?",
-      options: ["Michael Jordan", "LeBron James", "Kareem Abdul-Jabbar", "Bill Russell"],
-      correctIndex: 2,
-      timeLimit: 15
-    },
-    {
-      id: uuidv4(),
-      text: "Which NBA team drafted Kobe Bryant?",
-      options: ["Los Angeles Lakers", "Charlotte Hornets", "Chicago Bulls", "Philadelphia 76ers"],
+      text: "Which planet is known as the Red Planet?",
+      options: ["Earth", "Mars", "Jupiter", "Venus"],
       correctIndex: 1,
-      timeLimit: 15
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "What element has the chemical symbol 'O'?",
+      options: ["Gold", "Oxygen", "Iron", "Carbon"],
+      correctIndex: 1,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "What is the largest mammal on Earth?",
+      options: ["African Elephant", "Blue Whale", "Giraffe", "Hippopotamus"],
+      correctIndex: 1,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "Who wrote 'Romeo and Juliet'?",
+      options: ["Charles Dickens", "William Shakespeare", "Jane Austen", "Mark Twain"],
+      correctIndex: 1,
+      timeLimit: 10
     }
   ];
+  
+  // Medium questions
+  const mediumQuestions = [
+    {
+      id: uuidv4(),
+      text: "In which year did World War II end?",
+      options: ["1943", "1945", "1947", "1950"],
+      correctIndex: 1,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "Which element has the atomic number 79?",
+      options: ["Silver", "Gold", "Platinum", "Copper"],
+      correctIndex: 1,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "What is the capital of Australia?",
+      options: ["Sydney", "Melbourne", "Canberra", "Perth"],
+      correctIndex: 2,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "Who painted 'Starry Night'?",
+      options: ["Pablo Picasso", "Claude Monet", "Vincent van Gogh", "Leonardo da Vinci"],
+      correctIndex: 2,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "Which country is home to the Great Barrier Reef?",
+      options: ["Brazil", "Australia", "Thailand", "Mexico"],
+      correctIndex: 1,
+      timeLimit: 10
+    }
+  ];
+  
+  // Hard questions
+  const hardQuestions = [
+    {
+      id: uuidv4(),
+      text: "What is the smallest prime number greater than 100?",
+      options: ["101", "103", "107", "109"],
+      correctIndex: 0,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "Who was the first woman to win a Nobel Prize?",
+      options: ["Marie Curie", "Rosalind Franklin", "Dorothy Hodgkin", "Barbara McClintock"],
+      correctIndex: 0,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "What is the capital of Bhutan?",
+      options: ["Thimphu", "Kathmandu", "Dhaka", "Ulaanbaatar"],
+      correctIndex: 0,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "In which year was the first Olympic Games held in ancient Greece?",
+      options: ["776 BC", "896 BC", "480 BC", "520 BC"],
+      correctIndex: 0,
+      timeLimit: 10
+    },
+    {
+      id: uuidv4(),
+      text: "Who composed the opera 'The Magic Flute'?",
+      options: ["Johann Sebastian Bach", "Ludwig van Beethoven", "Wolfgang Amadeus Mozart", "Richard Wagner"],
+      correctIndex: 2,
+      timeLimit: 10
+    }
+  ];
+  
+  // Select based on difficulty
+  if (difficulty === 'easy') return easyQuestions;
+  if (difficulty === 'hard') return hardQuestions;
+  return mediumQuestions; // Default to medium
 }
 
 module.exports = {

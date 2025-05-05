@@ -65,7 +65,11 @@ io.on('connection', (socket) => {
       questionActivityTimestamp: null, // Timestamp of last activity
       questionHasActivity: false,      // Flag for if question was answered
       breakTimerInterval: null,        // Interval for break timer updates
-      triviaPaused: false              // Flag for if trivia is paused due to inactivity
+      triviaPaused: false,             // Flag for if trivia is paused due to inactivity
+      pendingAnswers: [],              // To store answers until question ends
+      playTrivia: data.playTrivia !== undefined ? data.playTrivia : true, // Whether to play trivia during breaks
+      triviaDifficulty: data.triviaDifficulty || 'medium', // Difficulty level
+      lastTriviaCategory: data.triviaCategory || 'General Knowledge' // Store last category for repeat rounds
     };
     
     activeRooms[roomId] = room;
@@ -152,18 +156,15 @@ io.on('connection', (socket) => {
       return;
     }
     
-    if (room.timerRunning) {
-      console.log(`Timer already running in room ${roomId}`);
-      return;
-    }
-    
+    // Allow starting timer even if already running (will reset the interval)
     console.log(`Starting timer in room ${roomId}, mode: ${room.currentMode}`);
-    room.timerRunning = true;
     
     // Clear any existing interval
     if (room.timerInterval) {
       clearInterval(room.timerInterval);
     }
+    
+    room.timerRunning = true;
     
     // Start the timer
     room.timerInterval = setInterval(() => {
@@ -197,7 +198,7 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('mode-changed', room.currentMode);
         io.to(roomId).emit('timer-update', {
           timeLeft: room.timerValue,
-          isRunning: room.timerRunning
+          isRunning: false
         });
       }
     }, 1000);
@@ -212,7 +213,7 @@ io.on('connection', (socket) => {
   socket.on('pause-timer', (roomId) => {
     console.log(`Pause timer request received for room ${roomId}`);
     const room = activeRooms[roomId];
-    if (room && socket.id === room.host && room.timerRunning) {
+    if (room && socket.id === room.host) {
       console.log(`Pausing timer in room ${roomId}`);
       clearInterval(room.timerInterval);
       room.timerRunning = false;
@@ -256,6 +257,52 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Topic selection
+  socket.on('select-topic', async (data) => {
+    const { roomId, topic, difficulty } = data;
+    const room = activeRooms[roomId];
+    
+    if (room && room.currentMode === 'trivia') {
+      console.log(`User selected new topic: ${topic}, difficulty: ${difficulty}`);
+      
+      room.triviaCategory = topic;
+      room.lastTriviaCategory = topic;
+      room.triviaDifficulty = difficulty || 'medium';
+      
+      // Reset question index
+      room.currentQuestionIndex = -1;
+      
+      // Notify clients that we're loading questions
+      io.to(roomId).emit('trivia-loading', true);
+      
+      try {
+        console.log(`Generating trivia for category: ${room.triviaCategory}, difficulty: ${room.triviaDifficulty}`);
+        // Use AI to generate questions
+        room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
+        
+        // Notify clients that questions are ready
+        io.to(roomId).emit('trivia-loading', false);
+        
+        // Start the first question after a short delay
+        setTimeout(() => {
+          nextTriviaQuestion(roomId);
+        }, 2000);
+      } catch (error) {
+        console.error("Error generating trivia questions:", error);
+        
+        // Fallback to predefined questions if AI generation fails
+        room.triviaQuestions = getPredefinedTriviaQuestions('general');
+        
+        io.to(roomId).emit('trivia-loading', false);
+        
+        // Start with predefined questions
+        setTimeout(() => {
+          nextTriviaQuestion(roomId);
+        }, 2000);
+      }
+    }
+  });
+  
   // Answer submission
   socket.on('submit-answer', (data) => {
     const { roomId, questionId, answerIndex, timeRemaining } = data;
@@ -288,32 +335,19 @@ io.on('connection', (socket) => {
         room.questionHasActivity = true;
         room.inactivityCount = 0;
         
-        // Check if answer is correct
-        const isCorrect = answerIndex === currentQuestion.correctIndex;
+        // Store the answer to process at the end of the question
+        room.pendingAnswers.push({
+          userId: socket.id,
+          answerIndex,
+          timeRemaining,
+          questionId
+        });
         
-        if (isCorrect) {
-          // Calculate score based on time remaining
-          // The faster the answer, the higher the score
-          const pointsEarned = Math.ceil(timeRemaining * (20 / currentQuestion.timeLimit));
-          
-          console.log(`User ${socket.id} answered correctly and earned ${pointsEarned} points`);
-          
-          // Update participant's score
-          const participant = room.participants.find(p => p.id === socket.id);
-          if (participant) {
-            participant.score += pointsEarned;
-            
-            // Send updated scores to all clients
-            io.to(roomId).emit('score-update', room.participants.map(p => ({
-              userId: p.id,
-              username: p.username,
-              score: p.score
-            })));
-            
-            // Log all participant scores to verify
-            console.log("Current scores:", room.participants.map(p => `${p.username}: ${p.score}`));
-          }
-        }
+        // Acknowledge receipt of answer to the user who submitted
+        socket.emit('answer-received', {
+          questionId,
+          answerIndex
+        });
       }
     }
   });
@@ -372,12 +406,31 @@ async function startTriviaSession(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
   
+  // Set the end time for the break
+  room.breakEndTime = Date.now() + (room.settings.breakTime * 1000);
+  
+  // Start break timer updates regardless of trivia mode
+  room.breakTimerInterval = setInterval(() => {
+    sendBreakTimeUpdate(roomId);
+  }, 1000);
+  
+  // If trivia is disabled, just notify clients about break mode
+  if (!room.playTrivia) {
+    console.log(`Trivia disabled for room ${roomId}, just taking a break`);
+    io.to(roomId).emit('trivia-disabled', {
+      message: "Taking a break. Trivia is disabled for this session.",
+      breakTime: room.settings.breakTime
+    });
+    
+    // When break time is over, we'll switch back to study mode automatically
+    return;
+  }
+  
+  // Reset trivia session state
   room.currentQuestionIndex = -1;
   room.inactivityCount = 0;
   room.triviaPaused = false;
-  
-  // Set the end time for the break
-  room.breakEndTime = Date.now() + (room.settings.breakTime * 1000);
+  room.pendingAnswers = [];
   
   // Reset all participants' scores for this session
   room.participants.forEach(p => {
@@ -391,40 +444,14 @@ async function startTriviaSession(roomId) {
     score: p.score
   })));
   
-  // Notify clients that we're loading questions
-  io.to(roomId).emit('trivia-loading', true);
+  // Send prompt to select/confirm trivia category
+  io.to(roomId).emit('select-category', {
+    lastCategory: room.lastTriviaCategory,
+    difficulty: room.triviaDifficulty
+  });
   
-  // Start break timer updates
-  room.breakTimerInterval = setInterval(() => {
-    sendBreakTimeUpdate(roomId);
-  }, 1000);
-  
-  // Generate or load trivia questions based on the category
-  try {
-    console.log(`Generating trivia for category: ${room.triviaCategory}`);
-    // Use AI to generate questions
-    room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5);
-    
-    // Notify clients that questions are ready
-    io.to(roomId).emit('trivia-loading', false);
-    
-    // Start the first question after a short delay
-    setTimeout(() => {
-      nextTriviaQuestion(roomId);
-    }, 2000);
-  } catch (error) {
-    console.error("Error generating trivia questions:", error);
-    
-    // Fallback to predefined questions if AI generation fails
-    room.triviaQuestions = getPredefinedTriviaQuestions('general');
-    
-    io.to(roomId).emit('trivia-loading', false);
-    
-    // Start with predefined questions
-    setTimeout(() => {
-      nextTriviaQuestion(roomId);
-    }, 2000);
-  }
+  // We'll wait for the host to select a category before generating questions
+  // This is handled by the 'select-topic' event
 }
 
 // Display the next trivia question
@@ -516,6 +543,7 @@ function nextTriviaQuestion(roomId) {
   // Reset question activity flag
   room.questionActivityTimestamp = Date.now();
   room.questionHasActivity = false; // Track if anyone answered this question
+  room.pendingAnswers = []; // Clear pending answers for the new question
   
   // Send the new question to all clients
   io.to(roomId).emit('new-question', {
@@ -541,10 +569,42 @@ function nextTriviaQuestion(roomId) {
     if (questionTimer <= 0) {
       clearInterval(questionInterval);
       
+      const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
+      
       // Reveal the correct answer
       io.to(roomId).emit('question-ended', {
         correctIndex: currentQuestion.correctIndex
       });
+      
+      // Process all pending answers and award points
+      const correctAnswers = room.pendingAnswers.filter(
+        answer => answer.answerIndex === currentQuestion.correctIndex
+      );
+      
+      // Award points for correct answers
+      for (const answer of correctAnswers) {
+        const participant = room.participants.find(p => p.id === answer.userId);
+        if (participant) {
+          // Calculate score based on time remaining
+          const pointsEarned = Math.ceil(answer.timeRemaining * (20 / currentQuestion.timeLimit));
+          participant.score += pointsEarned;
+          
+          console.log(`User ${answer.userId} earned ${pointsEarned} points`);
+        }
+      }
+      
+      // Clear pending answers
+      room.pendingAnswers = [];
+      
+      // Send updated scores to all clients
+      io.to(roomId).emit('score-update', room.participants.map(p => ({
+        userId: p.id,
+        username: p.username,
+        score: p.score
+      })));
+      
+      // Log all participant scores to verify
+      console.log("Current scores:", room.participants.map(p => `${p.username}: ${p.score}`));
       
       // If no activity on this question, increment inactivity counter
       if (!room.questionHasActivity) {
@@ -593,7 +653,8 @@ function endTriviaSession(roomId) {
         id: p.id,
         username: p.username,
         score: p.score
-      }))
+      })),
+      currentTopic: room.triviaCategory
     });
   }
 }
@@ -629,35 +690,35 @@ function getPredefinedTriviaQuestions(category, count = 5) {
       text: "What is the capital of France?",
       options: ["London", "Berlin", "Paris", "Madrid"],
       correctIndex: 2,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
       text: "Which planet is closest to the Sun?",
       options: ["Venus", "Mercury", "Mars", "Earth"],
       correctIndex: 1,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
       text: "What is the chemical symbol for gold?",
       options: ["Go", "Gd", "Au", "Ag"],
       correctIndex: 2,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
       text: "How many sides does a hexagon have?",
       options: ["5", "6", "7", "8"],
       correctIndex: 1,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
       text: "What is the largest ocean on Earth?",
       options: ["Atlantic", "Indian", "Arctic", "Pacific"],
       correctIndex: 3,
-      timeLimit: 15
+      timeLimit: 10
     }
   ];
   
@@ -667,35 +728,35 @@ function getPredefinedTriviaQuestions(category, count = 5) {
       text: "Which actor played Iron Man in the Marvel Cinematic Universe?",
       options: ["Chris Hemsworth", "Robert Downey Jr.", "Chris Evans", "Mark Ruffalo"],
       correctIndex: 1,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
       text: "What is the name of the fictional continent in Game of Thrones?",
       options: ["Essos", "Westeros", "Northeros", "Southeros"],
       correctIndex: 1,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
       text: "Which band performed the song 'Bohemian Rhapsody'?",
       options: ["The Beatles", "Queen", "Led Zeppelin", "AC/DC"],
       correctIndex: 1,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
       text: "Which movie franchise features a character named Harry Potter?",
       options: ["The Lord of the Rings", "Star Wars", "Harry Potter", "The Chronicles of Narnia"],
       correctIndex: 2,
-      timeLimit: 15
+      timeLimit: 10
     },
     {
       id: uuidv4(),
       text: "Who painted the Mona Lisa?",
       options: ["Vincent van Gogh", "Pablo Picasso", "Leonardo da Vinci", "Michelangelo"],
       correctIndex: 2,
-      timeLimit: 15
+      timeLimit: 10
     }
   ];
   
