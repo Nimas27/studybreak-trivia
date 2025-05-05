@@ -156,12 +156,23 @@ io.on('connection', (socket) => {
       return;
     }
     
-    // Allow starting timer even if already running (will reset the interval)
-    console.log(`Starting timer in room ${roomId}, mode: ${room.currentMode}`);
+    console.log(`Starting timer in room ${roomId}, mode: ${room.currentMode}, timeLeft: ${room.timerValue}`);
+    
+    // We'll always allow restarting the timer - fixes issue where timer can't be started
     
     // Clear any existing interval
     if (room.timerInterval) {
       clearInterval(room.timerInterval);
+    }
+    
+    // Make sure we have a positive time value
+    if (room.timerValue <= 0) {
+      // Reset to the appropriate timer based on mode
+      if (room.currentMode === 'study') {
+        room.timerValue = room.settings.studyTime;
+      } else {
+        room.timerValue = room.settings.breakTime;
+      }
     }
     
     room.timerRunning = true;
@@ -672,6 +683,36 @@ function sendBreakTimeUpdate(roomId) {
     timeLeft: remainingTime,
     isRunning: true
   });
+  
+  // Check if break time is over
+  if (remainingTime <= 0) {
+    console.log("Break time is over, ending trivia session automatically");
+    
+    io.to(roomId).emit('trivia-message', {
+      type: 'info',
+      message: 'Break time is over, returning to study mode'
+    });
+    
+    endTriviaSession(roomId);
+    
+    // Switch back to study mode
+    room.currentMode = 'study';
+    room.timerValue = room.settings.studyTime;
+    
+    io.to(roomId).emit('mode-changed', room.currentMode);
+    io.to(roomId).emit('timer-update', {
+      timeLeft: room.timerValue,
+      isRunning: false
+    });
+    
+    // Clear this interval
+    if (room.breakTimerInterval) {
+      clearInterval(room.breakTimerInterval);
+      room.breakTimerInterval = null;
+    }
+    
+    return;
+  }
   
   // If break time is almost over (10 seconds left), notify users
   if (remainingTime === 10) {
