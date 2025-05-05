@@ -285,50 +285,63 @@ io.on('connection', (socket) => {
   });
   
   // Topic selection
-  socket.on('select-topic', async (data) => {
-    const { roomId, topic, difficulty } = data;
-    const room = activeRooms[roomId];
+  // In server.js - Improve the select-topic handler
+socket.on('select-topic', async (data) => {
+  const { roomId, topic, difficulty } = data;
+  const room = activeRooms[roomId];
+  
+  console.log(`Received select-topic: roomId=${roomId}, topic=${topic}, difficulty=${difficulty}`);
+  
+  if (!room) {
+    console.log(`Room ${roomId} not found for topic selection`);
+    return;
+  }
+  
+  if (room.currentMode !== 'trivia') {
+    console.log(`Room ${roomId} is not in trivia mode, ignoring topic selection`);
+    return;
+  }
+  
+  console.log(`User selected new topic: ${topic}, difficulty: ${difficulty}`);
+  
+  room.triviaCategory = topic;
+  room.lastTriviaCategory = topic;
+  room.triviaDifficulty = difficulty || 'medium';
+  
+  // Reset question index
+  room.currentQuestionIndex = -1;
+  
+  // Notify clients that we're loading questions
+  io.to(roomId).emit('trivia-loading', true);
+  
+  try {
+    console.log(`Generating trivia for category: ${room.triviaCategory}, difficulty: ${room.triviaDifficulty}`);
+    // Use AI to generate questions
+    room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
+    console.log(`Generated ${room.triviaQuestions.length} questions successfully`);
     
-    if (room && room.currentMode === 'trivia') {
-      console.log(`User selected new topic: ${topic}, difficulty: ${difficulty}`);
-      
-      room.triviaCategory = topic;
-      room.lastTriviaCategory = topic;
-      room.triviaDifficulty = difficulty || 'medium';
-      
-      // Reset question index
-      room.currentQuestionIndex = -1;
-      
-      // Notify clients that we're loading questions
-      io.to(roomId).emit('trivia-loading', true);
-      
-      try {
-        console.log(`Generating trivia for category: ${room.triviaCategory}, difficulty: ${room.triviaDifficulty}`);
-        // Use AI to generate questions
-        room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
-        
-        // Notify clients that questions are ready
-        io.to(roomId).emit('trivia-loading', false);
-        
-        // Start the first question after a short delay
-        setTimeout(() => {
-          nextTriviaQuestion(roomId);
-        }, 2000);
-      } catch (error) {
-        console.error("Error generating trivia questions:", error);
-        
-        // Fallback to predefined questions if AI generation fails
-        room.triviaQuestions = getPredefinedTriviaQuestions('general');
-        
-        io.to(roomId).emit('trivia-loading', false);
-        
-        // Start with predefined questions
-        setTimeout(() => {
-          nextTriviaQuestion(roomId);
-        }, 2000);
-      }
-    }
-  });
+    // Notify clients that questions are ready
+    io.to(roomId).emit('trivia-loading', false);
+    
+    // Start the first question after a short delay
+    setTimeout(() => {
+      nextTriviaQuestion(roomId);
+    }, 2000);
+  } catch (error) {
+    console.error("Error generating trivia questions:", error);
+    
+    // Fallback to predefined questions if AI generation fails
+    console.log("Using fallback predefined questions");
+    room.triviaQuestions = getPredefinedTriviaQuestions('general');
+    
+    io.to(roomId).emit('trivia-loading', false);
+    
+    // Start with predefined questions
+    setTimeout(() => {
+      nextTriviaQuestion(roomId);
+    }, 2000);
+  }
+});
   
   // Answer submission
   socket.on('submit-answer', (data) => {
@@ -429,9 +442,12 @@ io.on('connection', (socket) => {
 });
 
 // Start a trivia session
+// In server.js - Add better logging in startTriviaSession
 async function startTriviaSession(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
+  
+  console.log(`Starting trivia session for room ${roomId}. Trivia enabled: ${room.playTrivia}`);
   
   // Set the end time for the break
   room.breakEndTime = Date.now() + (room.settings.breakTime * 1000);
@@ -471,14 +487,13 @@ async function startTriviaSession(roomId) {
     score: p.score
   })));
   
+  console.log(`Sending category selection prompt. Last category: ${room.lastTriviaCategory}`);
+  
   // Send prompt to select/confirm trivia category
   io.to(roomId).emit('select-category', {
     lastCategory: room.lastTriviaCategory,
     difficulty: room.triviaDifficulty
   });
-  
-  // We'll wait for the host to select a category before generating questions
-  // This is handled by the 'select-topic' event
 }
 
 // Display the next trivia question
@@ -651,6 +666,7 @@ function nextTriviaQuestion(roomId) {
 }
 
 // End a trivia session
+// In server.js - Update endTriviaSession
 function endTriviaSession(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
@@ -664,6 +680,12 @@ function endTriviaSession(roomId) {
   // Reset trivia state
   room.triviaPaused = false;
   room.inactivityCount = 0;
+  
+  // Reset any timers and ensure clean state transition
+  if (room.timerInterval) {
+    clearInterval(room.timerInterval);
+    room.timerInterval = null;
+  }
   
   // Announce the winner
   const sortedParticipants = [...room.participants].sort((a, b) => b.score - a.score);
@@ -686,7 +708,7 @@ function endTriviaSession(roomId) {
   }
 }
 
-// Send break time update to clients
+// In server.js - Update the sendBreakTimeUpdate function
 function sendBreakTimeUpdate(roomId) {
   const room = activeRooms[roomId];
   if (!room || room.currentMode !== 'trivia') return;
@@ -711,9 +733,10 @@ function sendBreakTimeUpdate(roomId) {
     
     endTriviaSession(roomId);
     
-    // Switch back to study mode
+    // Switch back to study mode with EXPLICIT timer state reset
     room.currentMode = 'study';
     room.timerValue = room.settings.studyTime;
+    room.timerRunning = false; // Ensure this is explicitly set to false
     
     io.to(roomId).emit('mode-changed', room.currentMode);
     io.to(roomId).emit('timer-update', {
