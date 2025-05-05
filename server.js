@@ -37,45 +37,61 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
   
   // Create a new room
-  socket.on('create-room', async (data, callback) => {
-    const roomId = generateRoomId();
+  ssocket.on('create-room', async (data, callback) => {
+    console.log('Create room request received:', data);
     
-    const user = {
-      id: socket.id,
-      username: data.host.username,
-      isHost: true,
-      score: 0
-    };
-    
-    const room = {
-      id: roomId,
-      name: data.roomName,
-      host: socket.id,
-      participants: [user],
-      settings: data.settings,
-      currentMode: 'study',
-      timerRunning: false,
-      timerValue: data.settings.studyTime,
-      triviaCategory: data.triviaCategory || 'General Knowledge', 
-      triviaQuestions: [],
-      currentQuestionIndex: -1,
-      timerInterval: null,
-      breakEndTime: null,              // Timestamp when break should end
-      inactivityCount: 0,              // Tracks consecutive unanswered questions
-      questionActivityTimestamp: null, // Timestamp of last activity
-      questionHasActivity: false,      // Flag for if question was answered
-      breakTimerInterval: null,        // Interval for break timer updates
-      triviaPaused: false,             // Flag for if trivia is paused due to inactivity
-      pendingAnswers: [],              // To store answers until question ends
-      playTrivia: data.playTrivia !== undefined ? data.playTrivia : true, // Whether to play trivia during breaks
-      triviaDifficulty: data.triviaDifficulty || 'medium', // Difficulty level
-      lastTriviaCategory: data.triviaCategory || 'General Knowledge' // Store last category for repeat rounds
-    };
-    
-    activeRooms[roomId] = room;
-    socket.join(roomId);
-    
-    callback(roomId);
+    try {
+      const roomId = generateRoomId();
+      console.log('Generated room ID:', roomId);
+      
+      const user = {
+        id: socket.id,
+        username: data.host.username,
+        isHost: true,
+        score: 0
+      };
+      
+      const room = {
+        id: roomId,
+        name: data.roomName,
+        host: socket.id,
+        participants: [user],
+        settings: data.settings,
+        currentMode: 'study',
+        timerRunning: false,
+        timerValue: data.settings.studyTime,
+        triviaCategory: data.triviaCategory || 'General Knowledge', 
+        triviaQuestions: [],
+        currentQuestionIndex: -1,
+        timerInterval: null,
+        breakEndTime: null,
+        inactivityCount: 0,
+        questionActivityTimestamp: null,
+        questionHasActivity: false,
+        breakTimerInterval: null,
+        triviaPaused: false,
+        pendingAnswers: [],
+        playTrivia: data.playTrivia !== undefined ? data.playTrivia : true,
+        triviaDifficulty: data.triviaDifficulty || 'medium',
+        lastTriviaCategory: data.triviaCategory || 'General Knowledge'
+      };
+      
+      activeRooms[roomId] = room;
+      socket.join(roomId);
+      
+      console.log('User joined room:', {roomId, userId: socket.id});
+      
+      if (typeof callback === 'function') {
+        callback(roomId);
+      } else {
+        console.error('Callback is not a function:', callback);
+      }
+    } catch (error) {
+      console.error('Error creating room:', error);
+      if (typeof callback === 'function') {
+        callback(null); // Return null to indicate failure
+      }
+    }
   });
   
   // Join an existing room
