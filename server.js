@@ -37,7 +37,7 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
   
   // Create a new room
-  ssocket.on('create-room', async (data, callback) => {
+  socket.on('create-room', async (data, callback) => {
     console.log('Create room request received:', data);
     
     try {
