@@ -14,9 +14,16 @@ const openai = new OpenAI({
  * @param {string} difficulty - Difficulty level (easy, medium, hard)
  * @returns {Array} - Array of question objects
  */
+// In aiTrivia.js - Enhance error handling and debugging
 async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') {
   try {
-    console.log(`Generating ${count} ${difficulty} trivia questions on topic: ${topic}`);
+    console.log(`Starting AI generation for ${count} ${difficulty} trivia questions on topic: ${topic}`);
+    
+    // Check if API key is available
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn("No OpenAI API key found, using fallback questions");
+      return getFallbackTriviaQuestions(difficulty);
+    }
     
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
@@ -47,7 +54,7 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
     
     // Debug the raw response content
     const responseContent = response.choices[0].message.content;
-    console.log("Response content:", responseContent.substring(0, 100) + "...");
+    console.log("Response content preview:", responseContent.substring(0, 100) + "...");
     
     let data;
     try {
@@ -56,6 +63,7 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
       console.log("Data structure:", Object.keys(data));
     } catch (parseError) {
       console.error("Error parsing JSON:", parseError);
+      console.error("Full response:", responseContent);
       throw new Error("Failed to parse response from OpenAI");
     }
     
@@ -63,7 +71,7 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
     if (!data.questions) {
       console.error("Response doesn't contain 'questions' field:", data);
       
-      // If we have a different structure, try to adapt
+      // Try to adapt to different structures
       if (data.trivia_questions) {
         console.log("Found 'trivia_questions' field instead of 'questions'");
         data.questions = data.trivia_questions;
@@ -84,7 +92,13 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
       throw new Error("Response format is incorrect - questions is not an array");
     }
     
+    if (data.questions.length === 0) {
+      console.error("Questions array is empty");
+      throw new Error("AI generated an empty questions array");
+    }
+    
     console.log("Successfully found questions array with length:", data.questions.length);
+    console.log("First question preview:", data.questions[0].text.substring(0, 30) + "...");
     
     // Add UUID to each question and ensure timeLimit is 10 seconds
     const questionsWithUuid = data.questions.map(question => ({
@@ -96,6 +110,7 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
     return questionsWithUuid;
   } catch (error) {
     console.error("Error generating trivia questions:", error);
+    console.error("Stack trace:", error.stack);
     // Return fallback questions in case of error
     return getFallbackTriviaQuestions(difficulty);
   }

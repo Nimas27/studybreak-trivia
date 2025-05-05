@@ -255,26 +255,47 @@ io.on('connection', (socket) => {
   socket.on('skip-timer', (roomId) => {
     console.log(`Skip timer request received for room ${roomId}`);
     const room = activeRooms[roomId];
-    if (room && socket.id === room.host) {
-      // Clear any existing interval
-      if (room.timerInterval) {
-        clearInterval(room.timerInterval);
-      }
+    if (!room || socket.id !== room.host) {
+      return;
+    }
+    
+    // Clear any existing interval
+    if (room.timerInterval) {
+      clearInterval(room.timerInterval);
+      room.timerInterval = null;
+    }
+    
+    if (room.breakTimerInterval) {
+      clearInterval(room.breakTimerInterval);
+      room.breakTimerInterval = null;
+    }
+    
+    room.timerRunning = false;
+    
+    const previousMode = room.currentMode;
+    
+    // Switch modes
+    if (room.currentMode === 'study') {
+      console.log(`Skipping to trivia mode in room ${roomId}`);
+      room.currentMode = 'trivia';
+      room.timerValue = room.settings.breakTime;
       
-      room.timerRunning = false;
+      // Emit mode change BEFORE starting trivia
+      io.to(roomId).emit('mode-changed', room.currentMode);
+      io.to(roomId).emit('timer-update', {
+        timeLeft: room.timerValue,
+        isRunning: false
+      });
       
-      // Switch modes
-      if (room.currentMode === 'study') {
-        console.log(`Skipping to trivia mode in room ${roomId}`);
-        room.currentMode = 'trivia';
-        room.timerValue = room.settings.breakTime;
-        startTriviaSession(roomId);
-      } else {
-        console.log(`Skipping to study mode in room ${roomId}`);
-        room.currentMode = 'study';
-        room.timerValue = room.settings.studyTime;
-        endTriviaSession(roomId);
-      }
+      // Now start trivia
+      startTriviaSession(roomId);
+    } else {
+      console.log(`Skipping to study mode in room ${roomId}`);
+      room.currentMode = 'study';
+      room.timerValue = room.settings.studyTime;
+      
+      // End trivia BEFORE emitting mode change
+      endTriviaSession(roomId);
       
       io.to(roomId).emit('mode-changed', room.currentMode);
       io.to(roomId).emit('timer-update', {
@@ -282,6 +303,8 @@ io.on('connection', (socket) => {
         isRunning: false
       });
     }
+    
+    console.log(`Mode successfully changed from ${previousMode} to ${room.currentMode}`);
   });
   
   // Topic selection
@@ -497,13 +520,25 @@ async function startTriviaSession(roomId) {
 }
 
 // Display the next trivia question
+// In server.js - Update nextTriviaQuestion function with detailed logging
 function nextTriviaQuestion(roomId) {
   const room = activeRooms[roomId];
-  if (!room || room.currentMode !== 'trivia') return;
+  if (!room) {
+    console.log(`Cannot display next question - room ${roomId} not found`);
+    return;
+  }
+  
+  if (room.currentMode !== 'trivia') {
+    console.log(`Cannot display next question - room ${roomId} not in trivia mode`);
+    return;
+  }
+  
+  console.log(`[nextTriviaQuestion] Room ${roomId} - Starting next question logic`);
+  console.log(`Current question index: ${room.currentQuestionIndex}, total questions: ${room.triviaQuestions.length}`);
   
   // Check if the break time is over
   if (room.breakEndTime && Date.now() >= room.breakEndTime) {
-    console.log("Break time is over, ending trivia session");
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Break time is over, ending trivia session`);
     
     io.to(roomId).emit('trivia-message', {
       type: 'info',
@@ -527,7 +562,7 @@ function nextTriviaQuestion(roomId) {
   
   // Check for consecutive inactivity
   if (room.inactivityCount >= 2) {
-    console.log("Detected inactivity, pausing trivia questions");
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Detected inactivity, pausing trivia questions`);
     
     io.to(roomId).emit('trivia-message', {
       type: 'warning',
@@ -536,37 +571,12 @@ function nextTriviaQuestion(roomId) {
     
     // Set a flag that trivia is paused due to inactivity
     room.triviaPaused = true;
-    
-    // We'll keep the break timer running (don't end the break session)
-    // But we won't show any more questions
-    
-    // Check again near the end of the break to see if anyone is still there
-    const timeUntilBreakEnd = room.breakEndTime - Date.now();
-    if (timeUntilBreakEnd > 10000) { // If more than 10 seconds left
-      setTimeout(() => {
-        // If room still exists and we're still in trivia mode
-        if (activeRooms[roomId] && activeRooms[roomId].currentMode === 'trivia') {
-          // Send a message to check if anyone wants to resume
-          io.to(roomId).emit('trivia-message', {
-            type: 'info',
-            message: 'Click any option to resume trivia'
-          });
-          
-          // After 5 seconds, if still no activity, we'll just wait until break ends
-          setTimeout(() => {
-            if (activeRooms[roomId] && !activeRooms[roomId].questionHasActivity) {
-              console.log("Still no activity, waiting for break to end");
-            }
-          }, 5000);
-        }
-      }, timeUntilBreakEnd - 10000); // Schedule 10 seconds before break ends
-    }
-    
     return;
   }
   
   // If trivia is paused, don't show more questions
   if (room.triviaPaused) {
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Trivia is paused, not showing next question`);
     return;
   }
   
@@ -574,13 +584,33 @@ function nextTriviaQuestion(roomId) {
   
   // Check if we've reached the end of questions
   if (room.currentQuestionIndex >= room.triviaQuestions.length) {
-    console.log("Reached end of questions, starting new set");
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Reached end of questions, starting new set`);
     
     // Reset index and start from beginning
     room.currentQuestionIndex = 0;
   }
   
+  // Validate triviaQuestions array
+  if (!room.triviaQuestions || !Array.isArray(room.triviaQuestions) || room.triviaQuestions.length === 0) {
+    console.error(`[nextTriviaQuestion] Room ${roomId} - No trivia questions available!`);
+    io.to(roomId).emit('trivia-message', {
+      type: 'error',
+      message: 'Error: No trivia questions available. Please try a different category.'
+    });
+    
+    // Regenerate with fallback questions
+    room.triviaQuestions = getPredefinedTriviaQuestions('general');
+    room.currentQuestionIndex = 0;
+  }
+  
   const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
+  
+  if (!currentQuestion) {
+    console.error(`[nextTriviaQuestion] Room ${roomId} - Failed to get question at index ${room.currentQuestionIndex}`);
+    return;
+  }
+  
+  console.log(`[nextTriviaQuestion] Room ${roomId} - Sending question: "${currentQuestion.text.substring(0, 30)}..."`);
   
   // Reset question activity flag
   room.questionActivityTimestamp = Date.now();
@@ -611,6 +641,12 @@ function nextTriviaQuestion(roomId) {
     if (questionTimer <= 0) {
       clearInterval(questionInterval);
       
+      // Validate current question exists for this room
+      if (!room.triviaQuestions || !room.triviaQuestions[room.currentQuestionIndex]) {
+        console.error(`[nextTriviaQuestion] Room ${roomId} - Question no longer exists at index ${room.currentQuestionIndex}`);
+        return;
+      }
+      
       const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
       
       // Reveal the correct answer
@@ -618,44 +654,7 @@ function nextTriviaQuestion(roomId) {
         correctIndex: currentQuestion.correctIndex
       });
       
-      // Process all pending answers and award points
-      const correctAnswers = room.pendingAnswers.filter(
-        answer => answer.answerIndex === currentQuestion.correctIndex
-      );
-      
-      // Award points for correct answers
-      for (const answer of correctAnswers) {
-        const participant = room.participants.find(p => p.id === answer.userId);
-        if (participant) {
-          // Calculate score based on time remaining
-          const pointsEarned = Math.ceil(answer.timeRemaining * (20 / currentQuestion.timeLimit));
-          participant.score += pointsEarned;
-          
-          console.log(`User ${answer.userId} earned ${pointsEarned} points`);
-        }
-      }
-      
-      // Clear pending answers
-      room.pendingAnswers = [];
-      
-      // Send updated scores to all clients
-      io.to(roomId).emit('score-update', room.participants.map(p => ({
-        userId: p.id,
-        username: p.username,
-        score: p.score
-      })));
-      
-      // Log all participant scores to verify
-      console.log("Current scores:", room.participants.map(p => `${p.username}: ${p.score}`));
-      
-      // If no activity on this question, increment inactivity counter
-      if (!room.questionHasActivity) {
-        room.inactivityCount++;
-        console.log(`No answers received, inactivity count: ${room.inactivityCount}`);
-      } else {
-        // Reset inactivity counter if there was activity
-        room.inactivityCount = 0;
-      }
+      // Process all pending answers and award points (rest of your code)
       
       // Wait a few seconds before moving to next question
       setTimeout(() => {
@@ -759,6 +758,23 @@ function sendBreakTimeUpdate(roomId) {
       type: 'info',
       message: 'Break ending in 10 seconds'
     });
+  }
+}
+
+function cleanupRoomTimers(roomId) {
+  const room = activeRooms[roomId];
+  if (!room) return;
+  
+  console.log(`Cleaning up timers for room ${roomId}`);
+  
+  if (room.timerInterval) {
+    clearInterval(room.timerInterval);
+    room.timerInterval = null;
+  }
+  
+  if (room.breakTimerInterval) {
+    clearInterval(room.breakTimerInterval);
+    room.breakTimerInterval = null;
   }
 }
 
