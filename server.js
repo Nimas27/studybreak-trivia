@@ -172,7 +172,7 @@ io.on('connection', (socket) => {
       return;
     }
     
-    console.log(`Starting timer in room ${roomId}, mode: ${room.currentMode}`);
+    console.log(`Starting timer in room ${roomId}, mode: ${room.currentMode}, timeLeft: ${room.timerValue}`);
     
     // Make sure we have a positive time value
     if (room.timerValue <= 0) {
@@ -229,36 +229,14 @@ io.on('connection', (socket) => {
         }
       }, 1000);
     } else if (room.currentMode === 'trivia') {
-      // Break timer - calculate remaining time
+      // Break timer - set the new end time based on remaining seconds
       const currentTime = Date.now();
-      const remainingTimeSeconds = Math.max(0, Math.floor((room.breakEndTime - currentTime) / 1000));
+      room.breakEndTime = currentTime + (room.timerValue * 1000);
       
-      if (remainingTimeSeconds > 0) {
-        // Update with the correct remaining time
-        room.timerValue = remainingTimeSeconds;
-        
-        // Reset break end time to the future
-        room.breakEndTime = currentTime + (remainingTimeSeconds * 1000);
-        
-        // Start break timer updates
-        room.breakTimerInterval = setInterval(() => {
-          sendBreakTimeUpdate(roomId);
-        }, 1000);
-      } else {
-        // Break time is already over, switch to study mode
-        endTriviaSession(roomId);
-        
-        room.currentMode = 'study';
-        room.timerValue = room.settings.studyTime;
-        
-        io.to(roomId).emit('mode-changed', room.currentMode);
-        io.to(roomId).emit('timer-update', {
-          timeLeft: room.timerValue,
-          isRunning: false
-        });
-        
-        return;
-      }
+      // Start break timer updates
+      room.breakTimerInterval = setInterval(() => {
+        sendBreakTimeUpdate(roomId);
+      }, 1000);
     }
     
     // Confirm timer started
@@ -284,16 +262,24 @@ io.on('connection', (socket) => {
     
     console.log(`Pausing timer in room ${roomId}, mode: ${room.currentMode}`);
     
-    // Clear the appropriate timer based on mode
     if (room.currentMode === 'study') {
+      // For study mode, simply clear the interval
       if (room.timerInterval) {
         clearInterval(room.timerInterval);
         room.timerInterval = null;
       }
     } else if (room.currentMode === 'trivia') {
+      // For break/trivia mode, we need to store the remaining time
       if (room.breakTimerInterval) {
         clearInterval(room.breakTimerInterval);
         room.breakTimerInterval = null;
+        
+        // Calculate remaining time and store it
+        const currentTime = Date.now();
+        const remainingTimeSeconds = Math.max(0, Math.floor((room.breakEndTime - currentTime) / 1000));
+        room.timerValue = remainingTimeSeconds;
+        
+        // We don't update breakEndTime yet - we'll do that when resumed
       }
     }
     
@@ -448,21 +434,13 @@ socket.on('select-topic', async (data) => {
         message: 'Trivia resumed!'
       });
       
-      // Start a new question after a short delay
-      setTimeout(() => {
-        nextTriviaQuestion(roomId);
-      }, 1500);
-      
+      // Start a new question immediately to resume trivia
+      nextTriviaQuestion(roomId);
       return;
     }
     
-    // Check if we have a current question
-    if (!room.triviaQuestions || room.currentQuestionIndex < 0 || room.currentQuestionIndex >= room.triviaQuestions.length) {
-      console.log(`No valid current question in room ${roomId}`);
-      return;
-    }
-    
-    const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
+    // Regular answer submission logic
+    const currentQuestion = room.triviaQuestions?.[room.currentQuestionIndex];
     
     if (currentQuestion && questionId === currentQuestion.id) {
       // Mark that we received an answer for this question
