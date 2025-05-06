@@ -410,21 +410,49 @@ socket.on('select-topic', async (data) => {
     
     // If trivia was paused due to inactivity, resume it
     if (room.triviaPaused) {
-      console.log(`Resuming trivia in room ${roomId} after inactivity`);
+      console.log(`Attempting to resume trivia in room ${roomId} after inactivity`);
+      
+      // Reset trivia state
       room.triviaPaused = false;
       room.inactivityCount = 0;
       
+      // Send a message to inform users
       io.to(roomId).emit('trivia-message', {
         type: 'success',
         message: 'Trivia resumed!'
       });
       
-      // Force a new question immediately
-      setTimeout(() => {
-        // Reset current question index to ensure a new question is selected
-        room.currentQuestionIndex = Math.max(0, room.currentQuestionIndex);
+      // Force-generate a new question immediately
+      try {
+        // Create a new question or reuse existing ones
+        if (!room.triviaQuestions || room.triviaQuestions.length === 0) {
+          console.log(`No questions available, using fallback questions`);
+          room.triviaQuestions = getPredefinedTriviaQuestions('general');
+        }
+        
+        // Reset question index to start fresh
+        room.currentQuestionIndex = -1;
+        
+        console.log(`Forcing next question to resume trivia`);
+        // Force a new question immediately
         nextTriviaQuestion(roomId);
-      }, 500);
+      } catch (error) {
+        console.error(`Error resuming trivia: ${error}`);
+        // Fallback approach - send a direct new question
+        if (room.triviaQuestions && room.triviaQuestions.length > 0) {
+          const question = room.triviaQuestions[0];
+          io.to(roomId).emit('new-question', {
+            question: {
+              id: question.id,
+              text: question.text,
+              options: question.options,
+              correctIndex: null // Don't send the correct answer yet
+            },
+            timeLimit: question.timeLimit,
+            total: room.triviaQuestions.length
+          });
+        }
+      }
       
       return;
     }
@@ -612,9 +640,14 @@ async function startTriviaSession(roomId) {
 // In server.js - Update nextTriviaQuestion function with detailed logging
 function nextTriviaQuestion(roomId) {
   const room = activeRooms[roomId];
-  if (!room || room.currentMode !== 'trivia') return;
+  if (!room || room.currentMode !== 'trivia') {
+    console.log(`Cannot display next question - room ${roomId} not found or not in trivia mode`);
+    return;
+  }
   
   console.log(`[nextTriviaQuestion] Room ${roomId} - Starting next question logic`);
+  console.log(`Current question index: ${room.currentQuestionIndex}, total questions: ${room.triviaQuestions?.length || 0}`);
+  console.log(`Is paused due to inactivity: ${room.triviaPaused}`);
   
   // Check if the break time is over
   if (room.breakEndTime && Date.now() >= room.breakEndTime) {
@@ -640,8 +673,8 @@ function nextTriviaQuestion(roomId) {
     return;
   }
   
-  // Check for consecutive inactivity
-  if (room.inactivityCount >= 2) {
+  // Check for consecutive inactivity - skip this check if we're resuming from inactivity
+  if (room.inactivityCount >= 2 && !room.resumingFromInactivity) {
     console.log(`[nextTriviaQuestion] Room ${roomId} - Detected inactivity (count: ${room.inactivityCount}), pausing trivia questions`);
     
     io.to(roomId).emit('trivia-message', {
@@ -654,12 +687,18 @@ function nextTriviaQuestion(roomId) {
     return;
   }
   
-  // If trivia is paused, don't show more questions
-  if (room.triviaPaused) {
+  // If trivia is paused and we're not explicitly resuming, don't show more questions
+  if (room.triviaPaused && !room.resumingFromInactivity) {
     console.log(`[nextTriviaQuestion] Room ${roomId} - Trivia is paused, not showing next question`);
     return;
   }
   
+  // Clear resuming flag if it was set
+  if (room.resumingFromInactivity) {
+    room.resumingFromInactivity = false;
+  }
+  
+  // Increment the question index
   room.currentQuestionIndex++;
   
   // Check if we've reached the end of questions
@@ -722,7 +761,8 @@ function nextTriviaQuestion(roomId) {
       clearInterval(questionInterval);
       
       // Make sure room and question still exist
-      if (!activeRooms[roomId] || !activeRooms[roomId].triviaQuestions || !activeRooms[roomId].triviaQuestions[activeRooms[roomId].currentQuestionIndex]) {
+      if (!activeRooms[roomId] || !activeRooms[roomId].triviaQuestions || 
+          !activeRooms[roomId].triviaQuestions[activeRooms[roomId].currentQuestionIndex]) {
         console.error(`Room or question no longer exists`);
         return;
       }
