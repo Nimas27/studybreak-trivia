@@ -70,7 +70,8 @@ io.on('connection', (socket) => {
       playTrivia: data.playTrivia !== undefined ? data.playTrivia : true, 
       triviaDifficulty: data.triviaDifficulty || 'medium', 
       lastTriviaCategory: data.triviaCategory || 'General Knowledge',
-      hasHadFirstTriviaRound: false // New flag to track first round
+      hasHadFirstTriviaRound: false, // Track first round
+      resumingFromInactivity: false  // IMPORTANT: Initialize this property
     };
     
     activeRooms[roomId] = room;
@@ -416,7 +417,9 @@ socket.on('select-topic', async (data) => {
       // Reset trivia state
       room.triviaPaused = false;
       room.inactivityCount = 0;
-      room.resumingFromInactivity = true; // Set a flag to indicate we're resuming
+      room.resumingFromInactivity = true; // Set flag to true
+      
+      console.log(`Set resumingFromInactivity flag to: ${room.resumingFromInactivity}`);
       
       // Send a message to inform users
       io.to(roomId).emit('trivia-message', {
@@ -427,7 +430,8 @@ socket.on('select-topic', async (data) => {
       // Force-generate a new question after a short delay
       setTimeout(() => {
         try {
-          console.log(`Generating new question after inactivity resumption`);
+          console.log(`Generating new question after inactivity resumption for room ${roomId}`);
+          console.log(`Current trivia state: paused=${room.triviaPaused}, resuming=${room.resumingFromInactivity}`);
           
           // Create a new question or reuse existing ones
           if (!room.triviaQuestions || room.triviaQuestions.length === 0) {
@@ -443,24 +447,45 @@ socket.on('select-topic', async (data) => {
           nextTriviaQuestion(roomId);
         } catch (error) {
           console.error(`Error resuming trivia: ${error}`);
-          // Fallback approach - send a direct new question
+          console.error(error.stack);
+          
+          // Extra fallback: Try to send a direct question if everything else fails
           if (room.triviaQuestions && room.triviaQuestions.length > 0) {
             const question = room.triviaQuestions[0];
-            console.log(`Using fallback approach to send question: ${question.text.substring(0, 30)}...`);
+            console.log(`Using emergency fallback approach to send question: ${question.text.substring(0, 30)}...`);
             
-            // Send question directly
+            // Send question directly without using nextTriviaQuestion
             io.to(roomId).emit('new-question', {
               question: {
                 id: question.id,
                 text: question.text,
                 options: question.options,
-                correctIndex: null // Don't send the correct answer yet
+                correctIndex: null 
               },
-              timeLimit: question.timeLimit,
-              total: room.triviaQuestions.length
+              timeLimit: question.timeLimit
             });
           } else {
             console.error(`Cannot resume trivia - no questions available`);
+            // Generate emergency questions
+            const emergencyQuestions = [
+              {
+                id: uuidv4(),
+                text: "What color is the sky on a clear day?",
+                options: ["Red", "Green", "Blue", "Yellow"],
+                correctIndex: 2,
+                timeLimit: 10
+              }
+            ];
+            
+            io.to(roomId).emit('new-question', {
+              question: {
+                id: emergencyQuestions[0].id,
+                text: emergencyQuestions[0].text,
+                options: emergencyQuestions[0].options,
+                correctIndex: null 
+              },
+              timeLimit: emergencyQuestions[0].timeLimit
+            });
           }
         }
       }, 1000); // Small delay so users can see the "resumed" message
@@ -658,8 +683,13 @@ async function startTriviaSession(roomId) {
 // In server.js - Update nextTriviaQuestion function with detailed logging
 function nextTriviaQuestion(roomId) {
   const room = activeRooms[roomId];
-  if (!room || room.currentMode !== 'trivia') {
-    console.log(`Cannot display next question - room ${roomId} not found or not in trivia mode`);
+  if (!room) {
+    console.log(`Cannot display next question - room ${roomId} not found`);
+    return;
+  }
+  
+  if (room.currentMode !== 'trivia') {
+    console.log(`Cannot display next question - room ${roomId} not in trivia mode`);
     return;
   }
   
@@ -714,6 +744,7 @@ function nextTriviaQuestion(roomId) {
   
   // Clear resuming flag if it was set
   if (room.resumingFromInactivity) {
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Clearing resumingFromInactivity flag`);
     room.resumingFromInactivity = false;
   }
   
@@ -741,6 +772,20 @@ function nextTriviaQuestion(roomId) {
     room.currentQuestionIndex = 0;
   }
   
+  // Double-check we have a valid question
+  if (!room.triviaQuestions || room.currentQuestionIndex < 0 || 
+      room.currentQuestionIndex >= room.triviaQuestions.length) {
+    console.error(`[nextTriviaQuestion] Room ${roomId} - Invalid question index: ${room.currentQuestionIndex}`);
+    
+    // Try to recover
+    if (room.triviaQuestions && room.triviaQuestions.length > 0) {
+      room.currentQuestionIndex = 0;
+    } else {
+      console.error(`[nextTriviaQuestion] Room ${roomId} - Cannot recover, no questions available`);
+      return;
+    }
+  }
+  
   const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
   
   if (!currentQuestion) {
@@ -763,8 +808,7 @@ function nextTriviaQuestion(roomId) {
       options: currentQuestion.options,
       correctIndex: null // Don't send the correct answer yet
     },
-    timeLimit: currentQuestion.timeLimit,
-    total: room.triviaQuestions.length
+    timeLimit: currentQuestion.timeLimit
   });
   
   let questionTimer = currentQuestion.timeLimit;
@@ -779,61 +823,71 @@ function nextTriviaQuestion(roomId) {
     if (questionTimer <= 0) {
       clearInterval(questionInterval);
       
-      // Make sure room and question still exist
-      if (!activeRooms[roomId] || !activeRooms[roomId].triviaQuestions || 
-          !activeRooms[roomId].triviaQuestions[activeRooms[roomId].currentQuestionIndex]) {
-        console.error(`Room or question no longer exists`);
-        return;
-      }
-      
-      const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
-      
-      // Reveal the correct answer
-      io.to(roomId).emit('question-ended', {
-        correctIndex: currentQuestion.correctIndex
-      });
-      
-      // Process all pending answers and award points
-      const correctAnswers = room.pendingAnswers.filter(
-        answer => answer.answerIndex === currentQuestion.correctIndex
-      );
-      
-      // Award points for correct answers
-      for (const answer of correctAnswers) {
-        const participant = room.participants.find(p => p.id === answer.userId);
-        if (participant) {
-          // Calculate score based on time remaining
-          const pointsEarned = Math.ceil(answer.timeRemaining * (20 / currentQuestion.timeLimit));
-          participant.score += pointsEarned;
-          
-          console.log(`User ${answer.userId} earned ${pointsEarned} points`);
+      try {
+        // Make sure room and question still exist
+        if (!activeRooms[roomId]) {
+          console.error(`Room ${roomId} no longer exists`);
+          return;
         }
+        
+        if (!activeRooms[roomId].triviaQuestions || 
+            !activeRooms[roomId].triviaQuestions[activeRooms[roomId].currentQuestionIndex]) {
+          console.error(`Question no longer exists in room ${roomId}`);
+          return;
+        }
+        
+        const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
+        
+        // Reveal the correct answer
+        io.to(roomId).emit('question-ended', {
+          correctIndex: currentQuestion.correctIndex
+        });
+        
+        // Process all pending answers and award points
+        const correctAnswers = room.pendingAnswers.filter(
+          answer => answer.answerIndex === currentQuestion.correctIndex
+        );
+        
+        // Award points for correct answers
+        for (const answer of correctAnswers) {
+          const participant = room.participants.find(p => p.id === answer.userId);
+          if (participant) {
+            // Calculate score based on time remaining
+            const pointsEarned = Math.ceil(answer.timeRemaining * (20 / currentQuestion.timeLimit));
+            participant.score += pointsEarned;
+            
+            console.log(`User ${answer.userId} earned ${pointsEarned} points`);
+          }
+        }
+        
+        // Check if there was any activity on this question
+        if (room.pendingAnswers.length === 0) {
+          room.inactivityCount++;
+          console.log(`No answers received, inactivity count increased to: ${room.inactivityCount}`);
+        } else {
+          // Reset inactivity counter if there was activity
+          room.inactivityCount = 0;
+          room.questionHasActivity = true;
+        }
+        
+        // Clear pending answers
+        room.pendingAnswers = [];
+        
+        // Send updated scores to all clients
+        io.to(roomId).emit('score-update', room.participants.map(p => ({
+          userId: p.id,
+          username: p.username,
+          score: p.score
+        })));
+        
+        // Wait a few seconds before moving to next question
+        setTimeout(() => {
+          nextTriviaQuestion(roomId);
+        }, 3000);
+      } catch (error) {
+        console.error(`Error processing question end: ${error}`);
+        console.error(error.stack);
       }
-      
-      // Check if there was any activity on this question
-      if (room.pendingAnswers.length === 0) {
-        room.inactivityCount++;
-        console.log(`No answers received, inactivity count increased to: ${room.inactivityCount}`);
-      } else {
-        // Reset inactivity counter if there was activity
-        room.inactivityCount = 0;
-        room.questionHasActivity = true;
-      }
-      
-      // Clear pending answers
-      room.pendingAnswers = [];
-      
-      // Send updated scores to all clients
-      io.to(roomId).emit('score-update', room.participants.map(p => ({
-        userId: p.id,
-        username: p.username,
-        score: p.score
-      })));
-      
-      // Wait a few seconds before moving to next question
-      setTimeout(() => {
-        nextTriviaQuestion(roomId);
-      }, 3000);
     }
   }, 1000);
 }
