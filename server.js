@@ -38,60 +38,45 @@ io.on('connection', (socket) => {
   
   // Create a new room
   socket.on('create-room', async (data, callback) => {
-    console.log('Create room request received:', data);
+    const roomId = generateRoomId();
     
-    try {
-      const roomId = generateRoomId();
-      console.log('Generated room ID:', roomId);
-      
-      const user = {
-        id: socket.id,
-        username: data.host.username,
-        isHost: true,
-        score: 0
-      };
-      
-      const room = {
-        id: roomId,
-        name: data.roomName,
-        host: socket.id,
-        participants: [user],
-        settings: data.settings,
-        currentMode: 'study',
-        timerRunning: false,
-        timerValue: data.settings.studyTime,
-        triviaCategory: data.triviaCategory || 'General Knowledge', 
-        triviaQuestions: [],
-        currentQuestionIndex: -1,
-        timerInterval: null,
-        breakEndTime: null,
-        inactivityCount: 0,
-        questionActivityTimestamp: null,
-        questionHasActivity: false,
-        breakTimerInterval: null,
-        triviaPaused: false,
-        pendingAnswers: [],
-        playTrivia: data.playTrivia !== undefined ? data.playTrivia : true,
-        triviaDifficulty: data.triviaDifficulty || 'medium',
-        lastTriviaCategory: data.triviaCategory || 'General Knowledge'
-      };
-      
-      activeRooms[roomId] = room;
-      socket.join(roomId);
-      
-      console.log('User joined room:', {roomId, userId: socket.id});
-      
-      if (typeof callback === 'function') {
-        callback(roomId);
-      } else {
-        console.error('Callback is not a function:', callback);
-      }
-    } catch (error) {
-      console.error('Error creating room:', error);
-      if (typeof callback === 'function') {
-        callback(null); // Return null to indicate failure
-      }
-    }
+    const user = {
+      id: socket.id,
+      username: data.host.username,
+      isHost: true,
+      score: 0
+    };
+    
+    const room = {
+      id: roomId,
+      name: data.roomName,
+      host: socket.id,
+      participants: [user],
+      settings: data.settings,
+      currentMode: 'study',
+      timerRunning: false,
+      timerValue: data.settings.studyTime,
+      triviaCategory: data.triviaCategory || 'General Knowledge', 
+      triviaQuestions: [],
+      currentQuestionIndex: -1,
+      timerInterval: null,
+      breakEndTime: null,              
+      inactivityCount: 0,              
+      questionActivityTimestamp: null, 
+      questionHasActivity: false,      
+      breakTimerInterval: null,        
+      triviaPaused: false,             
+      pendingAnswers: [],              
+      playTrivia: data.playTrivia !== undefined ? data.playTrivia : true, 
+      triviaDifficulty: data.triviaDifficulty || 'medium', 
+      lastTriviaCategory: data.triviaCategory || 'General Knowledge',
+      hasHadFirstTriviaRound: false // New flag to track first round
+    };
+    
+    activeRooms[roomId] = room;
+    socket.join(roomId);
+    
+    callback(roomId);
   });
   
   // Join an existing room
@@ -434,13 +419,24 @@ socket.on('select-topic', async (data) => {
         message: 'Trivia resumed!'
       });
       
-      // Start a new question immediately to resume trivia
-      nextTriviaQuestion(roomId);
+      // Force a new question immediately
+      setTimeout(() => {
+        // Reset current question index to ensure a new question is selected
+        room.currentQuestionIndex = Math.max(0, room.currentQuestionIndex);
+        nextTriviaQuestion(roomId);
+      }, 500);
+      
       return;
     }
     
     // Regular answer submission logic
-    const currentQuestion = room.triviaQuestions?.[room.currentQuestionIndex];
+    // Check if we have a current question
+    if (!room.triviaQuestions || room.currentQuestionIndex < 0 || room.currentQuestionIndex >= room.triviaQuestions.length) {
+      console.log(`No valid current question in room ${roomId}`);
+      return;
+    }
+    
+    const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
     
     if (currentQuestion && questionId === currentQuestion.id) {
       // Mark that we received an answer for this question
@@ -522,7 +518,7 @@ async function startTriviaSession(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
   
-  console.log(`Starting trivia session for room ${roomId}. Trivia enabled: ${room.playTrivia}`);
+  console.log(`Starting trivia session for room ${roomId}. Trivia enabled: ${room.playTrivia}, First run: ${!room.hasHadFirstTriviaRound}`);
   
   // Set the end time for the break
   room.breakEndTime = Date.now() + (room.settings.breakTime * 1000);
@@ -562,16 +558,23 @@ async function startTriviaSession(roomId) {
     score: p.score
   })));
   
-  // Check if this is the first trivia session (no previous topic selection)
-  if (!room.lastTriviaCategory) {
-    console.log(`First trivia session for room ${roomId}, using default category: ${room.triviaCategory}`);
+  // Check if this is the first trivia session (set a flag on the room to track this)
+  if (!room.hasHadFirstTriviaRound) {
+    console.log(`First trivia session for room ${roomId}, using default category without topic selection`);
     
-    // Notify clients we're loading questions
+    // Set the flag to indicate first round has occurred
+    room.hasHadFirstTriviaRound = true;
+    
+    // Notify clients that we're loading questions
     io.to(roomId).emit('trivia-loading', true);
     
     try {
       // Generate questions directly without asking for topic selection
+      console.log(`Generating initial trivia for category: ${room.triviaCategory}`);
       room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
+      
+      // Save the last category
+      room.lastTriviaCategory = room.triviaCategory;
       
       // Notify clients that questions are ready
       io.to(roomId).emit('trivia-loading', false);
