@@ -70,8 +70,9 @@ io.on('connection', (socket) => {
       playTrivia: data.playTrivia !== undefined ? data.playTrivia : true, 
       triviaDifficulty: data.triviaDifficulty || 'medium', 
       lastTriviaCategory: data.triviaCategory || 'General Knowledge',
-      hasHadFirstTriviaRound: false, // Track first round
-      resumingFromInactivity: false  // IMPORTANT: Initialize this property
+      hasHadFirstTriviaRound: false, // New flag to track first round
+      resumingFromInactivity: false,  // Initialize this property
+      questionInterval: null  // Store question timer intervals
     };
     
     activeRooms[roomId] = room;
@@ -132,6 +133,9 @@ io.on('connection', (socket) => {
           clearInterval(room.timerInterval);
           if (room.breakTimerInterval) {
             clearInterval(room.breakTimerInterval);
+          }
+          if (room.questionInterval) {
+            clearInterval(room.questionInterval);
           }
           delete activeRooms[roomId];
           return;
@@ -296,6 +300,11 @@ io.on('connection', (socket) => {
       room.breakTimerInterval = null;
     }
     
+    if (room.questionInterval) {
+      clearInterval(room.questionInterval);
+      room.questionInterval = null;
+    }
+    
     room.timerRunning = false;
     
     const previousMode = room.currentMode;
@@ -334,66 +343,64 @@ io.on('connection', (socket) => {
   });
   
   // Topic selection
-  // In server.js - Improve the select-topic handler
-socket.on('select-topic', async (data) => {
-  const { roomId, topic, difficulty } = data;
-  const room = activeRooms[roomId];
-  
-  console.log(`Received select-topic: roomId=${roomId}, topic=${topic}, difficulty=${difficulty}`);
-  
-  if (!room) {
-    console.log(`Room ${roomId} not found for topic selection`);
-    return;
-  }
-  
-  if (room.currentMode !== 'trivia') {
-    console.log(`Room ${roomId} is not in trivia mode, ignoring topic selection`);
-    return;
-  }
-  
-  console.log(`User selected new topic: ${topic}, difficulty: ${difficulty}`);
-  
-  room.triviaCategory = topic;
-  room.lastTriviaCategory = topic;
-  room.triviaDifficulty = difficulty || 'medium';
-  
-  // Reset question index
-  room.currentQuestionIndex = -1;
-  
-  // Notify clients that we're loading questions
-  io.to(roomId).emit('trivia-loading', true);
-  
-  try {
-    console.log(`Generating trivia for category: ${room.triviaCategory}, difficulty: ${room.triviaDifficulty}`);
-    // Use AI to generate questions
-    room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
-    console.log(`Generated ${room.triviaQuestions.length} questions successfully`);
+  socket.on('select-topic', async (data) => {
+    const { roomId, topic, difficulty } = data;
+    const room = activeRooms[roomId];
     
-    // Notify clients that questions are ready
-    io.to(roomId).emit('trivia-loading', false);
+    console.log(`Received select-topic: roomId=${roomId}, topic=${topic}, difficulty=${difficulty}`);
     
-    // Start the first question after a short delay
-    setTimeout(() => {
-      nextTriviaQuestion(roomId);
-    }, 2000);
-  } catch (error) {
-    console.error("Error generating trivia questions:", error);
+    if (!room) {
+      console.log(`Room ${roomId} not found for topic selection`);
+      return;
+    }
     
-    // Fallback to predefined questions if AI generation fails
-    console.log("Using fallback predefined questions");
-    room.triviaQuestions = getPredefinedTriviaQuestions('general');
+    if (room.currentMode !== 'trivia') {
+      console.log(`Room ${roomId} is not in trivia mode, ignoring topic selection`);
+      return;
+    }
     
-    io.to(roomId).emit('trivia-loading', false);
+    console.log(`User selected new topic: ${topic}, difficulty: ${difficulty}`);
     
-    // Start with predefined questions
-    setTimeout(() => {
-      nextTriviaQuestion(roomId);
-    }, 2000);
-  }
-});
+    room.triviaCategory = topic;
+    room.lastTriviaCategory = topic;
+    room.triviaDifficulty = difficulty || 'medium';
+    
+    // Reset question index
+    room.currentQuestionIndex = -1;
+    
+    // Notify clients that we're loading questions
+    io.to(roomId).emit('trivia-loading', true);
+    
+    try {
+      console.log(`Generating trivia for category: ${room.triviaCategory}, difficulty: ${room.triviaDifficulty}`);
+      // Use AI to generate questions
+      room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
+      console.log(`Generated ${room.triviaQuestions.length} questions successfully`);
+      
+      // Notify clients that questions are ready
+      io.to(roomId).emit('trivia-loading', false);
+      
+      // Start the first question after a short delay
+      setTimeout(() => {
+        nextTriviaQuestion(roomId);
+      }, 2000);
+    } catch (error) {
+      console.error("Error generating trivia questions:", error);
+      
+      // Fallback to predefined questions if AI generation fails
+      console.log("Using fallback predefined questions");
+      room.triviaQuestions = getPredefinedTriviaQuestions('general');
+      
+      io.to(roomId).emit('trivia-loading', false);
+      
+      // Start with predefined questions
+      setTimeout(() => {
+        nextTriviaQuestion(roomId);
+      }, 2000);
+    }
+  });
   
-  // Answer submission
-  // Replace the submit-answer event handler with this improved version
+  // Answer submission with improved inactivity handling
   socket.on('submit-answer', (data) => {
     const { roomId, questionId, answerIndex, timeRemaining } = data;
     const room = activeRooms[roomId];
@@ -410,9 +417,14 @@ socket.on('select-topic', async (data) => {
       return;
     }
     
+    // Special case: Is this a resumption click?
+    const isResumptionClick = questionId === 'resume-trivia' || 
+                             room.triviaPaused || 
+                             !room.triviaQuestions[room.currentQuestionIndex];
+    
     // If trivia was paused due to inactivity, resume it
-    if (room.triviaPaused) {
-      console.log(`Resuming trivia in room ${roomId} after inactivity`);
+    if (room.triviaPaused || isResumptionClick) {
+      console.log(`Resuming trivia in room ${roomId} after inactivity (paused=${room.triviaPaused})`);
       
       // Reset trivia state
       room.triviaPaused = false;
@@ -427,74 +439,34 @@ socket.on('select-topic', async (data) => {
         message: 'Trivia resumed!'
       });
       
-      // Force-generate a new question after a short delay
-      setTimeout(() => {
-        try {
-          console.log(`Generating new question after inactivity resumption for room ${roomId}`);
-          console.log(`Current trivia state: paused=${room.triviaPaused}, resuming=${room.resumingFromInactivity}`);
-          
-          // Create a new question or reuse existing ones
-          if (!room.triviaQuestions || room.triviaQuestions.length === 0) {
-            console.log(`No questions available, using fallback questions`);
-            room.triviaQuestions = getPredefinedTriviaQuestions('general');
-          }
-          
-          // Reset question index to start fresh
-          room.currentQuestionIndex = -1;
-          
-          console.log(`Forcing next question to resume trivia`);
-          // Force a new question immediately
-          nextTriviaQuestion(roomId);
-        } catch (error) {
-          console.error(`Error resuming trivia: ${error}`);
-          console.error(error.stack);
-          
-          // Extra fallback: Try to send a direct question if everything else fails
-          if (room.triviaQuestions && room.triviaQuestions.length > 0) {
-            const question = room.triviaQuestions[0];
-            console.log(`Using emergency fallback approach to send question: ${question.text.substring(0, 30)}...`);
-            
-            // Send question directly without using nextTriviaQuestion
-            io.to(roomId).emit('new-question', {
-              question: {
-                id: question.id,
-                text: question.text,
-                options: question.options,
-                correctIndex: null 
-              },
-              timeLimit: question.timeLimit
-            });
-          } else {
-            console.error(`Cannot resume trivia - no questions available`);
-            // Generate emergency questions
-            const emergencyQuestions = [
-              {
-                id: uuidv4(),
-                text: "What color is the sky on a clear day?",
-                options: ["Red", "Green", "Blue", "Yellow"],
-                correctIndex: 2,
-                timeLimit: 10
-              }
-            ];
-            
-            io.to(roomId).emit('new-question', {
-              question: {
-                id: emergencyQuestions[0].id,
-                text: emergencyQuestions[0].text,
-                options: emergencyQuestions[0].options,
-                correctIndex: null 
-              },
-              timeLimit: emergencyQuestions[0].timeLimit
-            });
-          }
-        }
-      }, 1000); // Small delay so users can see the "resumed" message
+      // IMPORTANT: Simply force a brand new question right now
+      // Reset question index and get a new question
+      room.currentQuestionIndex = -1;  // Set to -1 so it becomes 0 when incremented
       
-      // Acknowledge receipt of action to the user
+      // Clear any existing question timers
+      if (room.questionInterval) {
+        clearInterval(room.questionInterval);
+        room.questionInterval = null;
+      }
+      
+      // Send a simple ack to the client
       socket.emit('answer-received', {
         questionId,
         answerIndex
       });
+      
+      // Force a new question immediately - with a small delay to let the message be seen
+      setTimeout(() => {
+        // Force new question
+        try {
+          console.log(`Forcing new question for room ${roomId} after inactivity`);
+          nextTriviaQuestion(roomId);
+        } catch (error) {
+          console.error("Error sending new question after inactivity:", error);
+          // Emergency fallback
+          sendEmergencyQuestion(roomId);
+        }
+      }, 1500);
       
       return; // Skip normal answer processing when resuming
     }
@@ -571,6 +543,9 @@ socket.on('select-topic', async (data) => {
             if (room.breakTimerInterval) {
               clearInterval(room.breakTimerInterval);
             }
+            if (room.questionInterval) {
+              clearInterval(room.questionInterval);
+            }
             delete activeRooms[roomId];
             return;
           }
@@ -584,7 +559,6 @@ socket.on('select-topic', async (data) => {
 });
 
 // Start a trivia session
-// In server.js - Add better logging in startTriviaSession
 async function startTriviaSession(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
@@ -615,6 +589,7 @@ async function startTriviaSession(roomId) {
   room.currentQuestionIndex = -1;
   room.inactivityCount = 0;
   room.triviaPaused = false;
+  room.resumingFromInactivity = false;
   room.pendingAnswers = [];
   
   // Reset all participants' scores for this session
@@ -680,7 +655,6 @@ async function startTriviaSession(roomId) {
 }
 
 // Display the next trivia question
-// In server.js - Update nextTriviaQuestion function with detailed logging
 function nextTriviaQuestion(roomId) {
   const room = activeRooms[roomId];
   if (!room) {
@@ -813,7 +787,7 @@ function nextTriviaQuestion(roomId) {
   
   let questionTimer = currentQuestion.timeLimit;
   
-  // Start question timer
+  // Start question timer and store the interval reference
   const questionInterval = setInterval(() => {
     questionTimer--;
     
@@ -890,10 +864,67 @@ function nextTriviaQuestion(roomId) {
       }
     }
   }, 1000);
+  
+  // Store the interval reference in the room for cleanup
+  room.questionInterval = questionInterval;
+}
+
+// Emergency fallback for inactivity resumption
+function sendEmergencyQuestion(roomId) {
+  console.log(`Sending emergency fallback question to room ${roomId}`);
+  
+  const room = activeRooms[roomId];
+  if (!room) return;
+  
+  // Create an emergency question
+  const emergencyQuestion = {
+    id: uuidv4(),
+    text: "Which of these is a primary color?",
+    options: ["Orange", "Green", "Blue", "Purple"],
+    correctIndex: 2,
+    timeLimit: 10
+  };
+  
+  // Send it directly
+  io.to(roomId).emit('new-question', {
+    question: {
+      id: emergencyQuestion.id,
+      text: emergencyQuestion.text,
+      options: emergencyQuestion.options,
+      correctIndex: null
+    },
+    timeLimit: emergencyQuestion.timeLimit
+  });
+  
+  // Start a timer for this question
+  let questionTimer = emergencyQuestion.timeLimit;
+  
+  const questionInterval = setInterval(() => {
+    questionTimer--;
+    
+    io.to(roomId).emit('question-timer', questionTimer);
+    
+    if (questionTimer <= 0) {
+      clearInterval(questionInterval);
+      
+      // Show correct answer
+      io.to(roomId).emit('question-ended', {
+        correctIndex: emergencyQuestion.correctIndex
+      });
+      
+      // After 3 seconds, try normal question flow again
+      setTimeout(() => {
+        room.currentQuestionIndex = -1;
+        nextTriviaQuestion(roomId);
+      }, 3000);
+    }
+  }, 1000);
+  
+  // Store the interval
+  room.questionInterval = questionInterval;
 }
 
 // End a trivia session
-// In server.js - Update endTriviaSession
 function endTriviaSession(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
@@ -904,9 +935,16 @@ function endTriviaSession(roomId) {
     room.breakTimerInterval = null;
   }
   
+  // Clean up any question timer
+  if (room.questionInterval) {
+    clearInterval(room.questionInterval);
+    room.questionInterval = null;
+  }
+  
   // Reset trivia state
   room.triviaPaused = false;
   room.inactivityCount = 0;
+  room.resumingFromInactivity = false;
   
   // Reset any timers and ensure clean state transition
   if (room.timerInterval) {
@@ -935,7 +973,7 @@ function endTriviaSession(roomId) {
   }
 }
 
-// In server.js - Update the sendBreakTimeUpdate function
+// Send break timer updates
 function sendBreakTimeUpdate(roomId) {
   const room = activeRooms[roomId];
   if (!room || room.currentMode !== 'trivia') return;
@@ -989,6 +1027,7 @@ function sendBreakTimeUpdate(roomId) {
   }
 }
 
+// Helper function to clean up room timers
 function cleanupRoomTimers(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
@@ -1003,6 +1042,11 @@ function cleanupRoomTimers(roomId) {
   if (room.breakTimerInterval) {
     clearInterval(room.breakTimerInterval);
     room.breakTimerInterval = null;
+  }
+  
+  if (room.questionInterval) {
+    clearInterval(room.questionInterval);
+    room.questionInterval = null;
   }
 }
 
