@@ -392,6 +392,7 @@ socket.on('select-topic', async (data) => {
 });
   
   // Answer submission
+  // Replace the submit-answer event handler with this improved version
   socket.on('submit-answer', (data) => {
     const { roomId, questionId, answerIndex, timeRemaining } = data;
     const room = activeRooms[roomId];
@@ -410,11 +411,12 @@ socket.on('select-topic', async (data) => {
     
     // If trivia was paused due to inactivity, resume it
     if (room.triviaPaused) {
-      console.log(`Attempting to resume trivia in room ${roomId} after inactivity`);
+      console.log(`Resuming trivia in room ${roomId} after inactivity`);
       
       // Reset trivia state
       room.triviaPaused = false;
       room.inactivityCount = 0;
+      room.resumingFromInactivity = true; // Set a flag to indicate we're resuming
       
       // Send a message to inform users
       io.to(roomId).emit('trivia-message', {
@@ -422,44 +424,60 @@ socket.on('select-topic', async (data) => {
         message: 'Trivia resumed!'
       });
       
-      // Force-generate a new question immediately
-      try {
-        // Create a new question or reuse existing ones
-        if (!room.triviaQuestions || room.triviaQuestions.length === 0) {
-          console.log(`No questions available, using fallback questions`);
-          room.triviaQuestions = getPredefinedTriviaQuestions('general');
+      // Force-generate a new question after a short delay
+      setTimeout(() => {
+        try {
+          console.log(`Generating new question after inactivity resumption`);
+          
+          // Create a new question or reuse existing ones
+          if (!room.triviaQuestions || room.triviaQuestions.length === 0) {
+            console.log(`No questions available, using fallback questions`);
+            room.triviaQuestions = getPredefinedTriviaQuestions('general');
+          }
+          
+          // Reset question index to start fresh
+          room.currentQuestionIndex = -1;
+          
+          console.log(`Forcing next question to resume trivia`);
+          // Force a new question immediately
+          nextTriviaQuestion(roomId);
+        } catch (error) {
+          console.error(`Error resuming trivia: ${error}`);
+          // Fallback approach - send a direct new question
+          if (room.triviaQuestions && room.triviaQuestions.length > 0) {
+            const question = room.triviaQuestions[0];
+            console.log(`Using fallback approach to send question: ${question.text.substring(0, 30)}...`);
+            
+            // Send question directly
+            io.to(roomId).emit('new-question', {
+              question: {
+                id: question.id,
+                text: question.text,
+                options: question.options,
+                correctIndex: null // Don't send the correct answer yet
+              },
+              timeLimit: question.timeLimit,
+              total: room.triviaQuestions.length
+            });
+          } else {
+            console.error(`Cannot resume trivia - no questions available`);
+          }
         }
-        
-        // Reset question index to start fresh
-        room.currentQuestionIndex = -1;
-        
-        console.log(`Forcing next question to resume trivia`);
-        // Force a new question immediately
-        nextTriviaQuestion(roomId);
-      } catch (error) {
-        console.error(`Error resuming trivia: ${error}`);
-        // Fallback approach - send a direct new question
-        if (room.triviaQuestions && room.triviaQuestions.length > 0) {
-          const question = room.triviaQuestions[0];
-          io.to(roomId).emit('new-question', {
-            question: {
-              id: question.id,
-              text: question.text,
-              options: question.options,
-              correctIndex: null // Don't send the correct answer yet
-            },
-            timeLimit: question.timeLimit,
-            total: room.triviaQuestions.length
-          });
-        }
-      }
+      }, 1000); // Small delay so users can see the "resumed" message
       
-      return;
+      // Acknowledge receipt of action to the user
+      socket.emit('answer-received', {
+        questionId,
+        answerIndex
+      });
+      
+      return; // Skip normal answer processing when resuming
     }
     
     // Regular answer submission logic
     // Check if we have a current question
-    if (!room.triviaQuestions || room.currentQuestionIndex < 0 || room.currentQuestionIndex >= room.triviaQuestions.length) {
+    if (!room.triviaQuestions || room.currentQuestionIndex < 0 || 
+        room.currentQuestionIndex >= room.triviaQuestions.length) {
       console.log(`No valid current question in room ${roomId}`);
       return;
     }
@@ -648,6 +666,7 @@ function nextTriviaQuestion(roomId) {
   console.log(`[nextTriviaQuestion] Room ${roomId} - Starting next question logic`);
   console.log(`Current question index: ${room.currentQuestionIndex}, total questions: ${room.triviaQuestions?.length || 0}`);
   console.log(`Is paused due to inactivity: ${room.triviaPaused}`);
+  console.log(`Is resuming from inactivity: ${room.resumingFromInactivity}`);
   
   // Check if the break time is over
   if (room.breakEndTime && Date.now() >= room.breakEndTime) {
