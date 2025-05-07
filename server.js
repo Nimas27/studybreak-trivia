@@ -375,14 +375,62 @@ socket.on('select-topic', async (data) => {
   
   try {
     console.log(`Generating trivia for category: ${room.triviaCategory}, difficulty: ${room.triviaDifficulty}`);
-    // Use AI to generate questions
-    room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
-    console.log(`Generated ${room.triviaQuestions.length} questions successfully`);
+    
+    // Generate more questions than needed
+    const allQuestions = await generateTriviaQuestions(room.triviaCategory, QUESTIONS_TO_FETCH, room.triviaDifficulty);
+    console.log(`Generated ${allQuestions.length} questions successfully`);
+    
+    // Create a unique key for this topic+difficulty
+    const questionKey = `${room.triviaCategory.toLowerCase()}_${room.triviaDifficulty}`;
+    
+    // Get any previously used question IDs for this topic+difficulty
+    const usedQuestionIds = usedQuestions.get(questionKey) || new Set();
+    
+    // Filter out any previously used questions
+    let unusedQuestions = allQuestions.filter(q => !usedQuestionIds.has(q.id));
+    
+    // If we don't have enough unused questions, use some used ones but prefer older ones
+    if (unusedQuestions.length < QUESTIONS_TO_SHOW) {
+      console.log(`Not enough unused questions, reusing some older ones`);
+      const additionalNeeded = QUESTIONS_TO_SHOW - unusedQuestions.length;
+      
+      // Get all questions for this topic (used and unused)
+      const allTopicQuestions = [...allQuestions];
+      
+      // Sort by generation time if available (oldest first)
+      allTopicQuestions.sort((a, b) => (a.generatedAt || 0) - (b.generatedAt || 0));
+      
+      // Add older questions until we have enough
+      for (const question of allTopicQuestions) {
+        if (unusedQuestions.length >= QUESTIONS_TO_SHOW) break;
+        if (!unusedQuestions.some(q => q.id === question.id)) {
+          unusedQuestions.push(question);
+        }
+      }
+    }
+    
+    // If we still don't have enough, supplement with random questions
+    if (unusedQuestions.length < QUESTIONS_TO_SHOW) {
+      console.log(`Still not enough questions, generating fallbacks`);
+      const fallbacks = getPredefinedTriviaQuestions('general').slice(0, QUESTIONS_TO_SHOW - unusedQuestions.length);
+      unusedQuestions = [...unusedQuestions, ...fallbacks];
+    }
+    
+    // Take a subset of questions to use for this session
+    room.triviaQuestions = unusedQuestions.slice(0, QUESTIONS_TO_SHOW);
     
     // Apply custom time limit to all questions
     room.triviaQuestions.forEach(question => {
       question.timeLimit = room.triviaTimeLimit;
+      
+      // Mark this question as used by adding to the Set
+      usedQuestionIds.add(question.id);
     });
+    
+    // Update the used questions Map
+    usedQuestions.set(questionKey, usedQuestionIds);
+    
+    console.log(`Selected ${room.triviaQuestions.length} questions for this session (${usedQuestionIds.size} total used for this topic)`);
     
     // Notify clients that questions are ready
     io.to(roomId).emit('trivia-loading', false);
@@ -661,13 +709,35 @@ async function startTriviaSession(roomId) {
     io.to(roomId).emit('trivia-loading', true);
     
     try {
-      // Generate questions directly without asking for topic selection
+      // Generate more questions than needed
       console.log(`Generating initial trivia for category: ${room.triviaCategory}, time limit: ${room.triviaTimeLimit}s`);
-      room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
+      const allQuestions = await generateTriviaQuestions(room.triviaCategory, QUESTIONS_TO_FETCH, room.triviaDifficulty);
       
-      // Apply custom time limit to all questions
+      // Create a unique key for this topic+difficulty
+      const questionKey = `${room.triviaCategory.toLowerCase()}_${room.triviaDifficulty}`;
+      
+      // Initialize the used questions set for this topic if needed
+      if (!usedQuestions.has(questionKey)) {
+        usedQuestions.set(questionKey, new Set());
+      }
+      
+      const usedQuestionIds = usedQuestions.get(questionKey);
+      
+      // Take a subset of questions, preferring ones not used before
+      let unusedQuestions = allQuestions.filter(q => !usedQuestionIds.has(q.id));
+      
+      // If we don't have enough, just use what we have
+      if (unusedQuestions.length < QUESTIONS_TO_SHOW) {
+        unusedQuestions = [...unusedQuestions, ...allQuestions.slice(0, QUESTIONS_TO_SHOW - unusedQuestions.length)];
+      }
+      
+      // Use these questions for this session
+      room.triviaQuestions = unusedQuestions.slice(0, QUESTIONS_TO_SHOW);
+      
+      // Apply custom time limit to all questions and mark as used
       room.triviaQuestions.forEach(question => {
         question.timeLimit = room.triviaTimeLimit;
+        usedQuestionIds.add(question.id);
       });
       
       // Save the last category
@@ -785,10 +855,32 @@ function nextTriviaQuestion(roomId) {
   
   // Check if we've reached the end of questions
   if (room.currentQuestionIndex >= room.triviaQuestions.length) {
-    console.log(`[nextTriviaQuestion] Room ${roomId} - Reached end of questions, starting new set`);
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Reached end of questions`);
     
-    // Reset index and start from beginning
-    room.currentQuestionIndex = 0;
+    // Instead of just restarting, try to get a new set of questions
+    if (Date.now() < room.breakEndTime - 10000) { // If at least 10 seconds left in break
+      console.log(`[nextTriviaQuestion] Room ${roomId} - Still time left in break, fetching new questions`);
+      
+      // Send message to clients that we're getting new questions
+      io.to(roomId).emit('trivia-message', {
+        type: 'info',
+        message: 'Loading new questions...'
+      });
+      
+      // Trigger getting new questions as if a new topic was selected
+      socket.emit('select-topic', {
+        roomId,
+        topic: room.triviaCategory,
+        difficulty: room.triviaDifficulty,
+        timeLimit: room.triviaTimeLimit
+      });
+      
+      return;
+    } else {
+      // Not enough time left, just loop back to the first question
+      console.log(`[nextTriviaQuestion] Room ${roomId} - Not enough time left, reusing current questions`);
+      room.currentQuestionIndex = 0;
+    }
   }
   
   // Validate triviaQuestions array
