@@ -73,7 +73,9 @@ io.on('connection', (socket) => {
       hasHadFirstTriviaRound: false,
       triviaTimeLimit: data.triviaTimeLimit || 10, // Store the custom time limit
       resumingFromInactivity: false,
-      questionInterval: null
+      questionInterval: null,
+      nextBatchQuestions: null,        // Store the next batch of questions
+      isRegeneratingQuestions: false  // Flag to track background regeneration
     };
     
     console.log(`Creating room with trivia time limit: ${room.triviaTimeLimit} seconds`);
@@ -619,6 +621,14 @@ async function startTriviaSession(roomId) {
     sendBreakTimeUpdate(roomId);
   }, 1000);
   
+  if (!room.hasHadFirstTriviaRound) {
+    // After generating the first batch of questions,
+    // start generating the next batch in the background
+    setTimeout(() => {
+      backgroundRegenerateQuestionsForRoom(roomId);
+    }, 5000); // Wait 5 seconds after session starts to avoid overloading
+  }
+
   // If trivia is disabled, just notify clients about break mode
   if (!room.playTrivia) {
     console.log(`Trivia disabled for room ${roomId}, just taking a break`);
@@ -629,6 +639,8 @@ async function startTriviaSession(roomId) {
     
     // When break time is over, we'll switch back to study mode automatically
     return;
+
+  
   }
   
   // Reset trivia session state
@@ -752,49 +764,62 @@ function nextTriviaQuestion(roomId) {
     
     return;
   }
-  if (room.currentQuestionIndex >= room.triviaQuestions.length - 1) {
-    console.log(`[nextTriviaQuestion] Room ${roomId} - Used all questions, generating new ones`);
+  // OPTIMIZATION: If we're at the second-to-last question, start generating the next batch
+  // This way, new questions will be ready when needed without showing any loading screen
+  if (room.currentQuestionIndex === room.triviaQuestions.length - 2) {
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Preemptively generating next batch of questions`);
     
-    // Check if there's still reasonable time left in the break (at least 20 seconds)
-    const timeLeft = Math.max(0, Math.floor((room.breakEndTime - Date.now()) / 1000));
-    
-    if (timeLeft >= 20) {
-      // Show a message that we're loading more questions
-      io.to(roomId).emit('trivia-message', {
-        type: 'info',
-        message: 'Loading new questions...'
-      });
-      
-      // Generate new questions
-      regenerateQuestionsForRoom(roomId);
-      return; // Exit this function; it will be called again after new questions are ready
-    } else {
-      // If not much time left, just end the trivia session
-      console.log(`[nextTriviaQuestion] Room ${roomId} - Not enough time left for new questions`);
-      
-      io.to(roomId).emit('trivia-message', {
-        type: 'info',
-        message: 'Break time is almost over, returning to study mode'
-      });
-      
-      endTriviaSession(roomId);
-      
-      // Switch back to study mode
-      room.currentMode = 'study';
-      room.timerValue = room.settings.studyTime;
-      
-      io.to(roomId).emit('mode-changed', room.currentMode);
-      io.to(roomId).emit('timer-update', {
-        timeLeft: room.timerValue,
-        isRunning: false
-      });
-      
-      return;
-    }
+    // Start regenerating questions in the background
+    // We don't await this, it happens asynchronously
+    backgroundRegenerateQuestionsForRoom(roomId);
   }
   
-  // Increment the question index now that we know we have enough questions
-  room.currentQuestionIndex++;
+  // If we've reached the end of the current questions
+  if (room.currentQuestionIndex >= room.triviaQuestions.length - 1) {
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Reached end of current questions`);
+    
+    // Check if we have next batch ready
+    if (room.nextBatchQuestions && room.nextBatchQuestions.length > 0) {
+      console.log(`[nextTriviaQuestion] Room ${roomId} - Using pre-generated next batch`);
+      
+      // Swap in the next batch
+      room.triviaQuestions = room.nextBatchQuestions;
+      room.nextBatchQuestions = null; // Clear the next batch
+      room.currentQuestionIndex = 0; // Reset to first question
+    } 
+    else {
+      // Check if there's still reasonable time left in the break
+      const timeLeft = Math.max(0, Math.floor((room.breakEndTime - Date.now()) / 1000));
+      
+      if (timeLeft < 20) {
+        // If not much time left, just end the trivia session
+        console.log(`[nextTriviaQuestion] Room ${roomId} - Not enough time left for more questions`);
+        
+        endTriviaSession(roomId);
+        
+        // Switch back to study mode
+        room.currentMode = 'study';
+        room.timerValue = room.settings.studyTime;
+        
+        io.to(roomId).emit('mode-changed', room.currentMode);
+        io.to(roomId).emit('timer-update', {
+          timeLeft: room.timerValue,
+          isRunning: false
+        });
+        
+        return;
+      }
+      
+      // If we get here, it means we need questions but don't have a next batch
+      // We'll loop back to the beginning as a fallback
+      console.log(`[nextTriviaQuestion] Room ${roomId} - No next batch ready, looping current questions`);
+      room.currentQuestionIndex = 0;
+    }
+  } 
+  else {
+    // Normal case - increment the question index
+    room.currentQuestionIndex++;
+  }
 
   // Check for consecutive inactivity - skip this check if we're resuming from inactivity
   if (room.inactivityCount >= 2 && !room.resumingFromInactivity) {
@@ -847,17 +872,10 @@ function nextTriviaQuestion(roomId) {
   }
   
   // Double-check we have a valid question
-  if (!room.triviaQuestions || room.currentQuestionIndex < 0 || 
-      room.currentQuestionIndex >= room.triviaQuestions.length) {
-    console.error(`[nextTriviaQuestion] Room ${roomId} - Invalid question index: ${room.currentQuestionIndex}`);
-    
-    // Try to recover
-    if (room.triviaQuestions && room.triviaQuestions.length > 0) {
-      room.currentQuestionIndex = 0;
-    } else {
-      console.error(`[nextTriviaQuestion] Room ${roomId} - Cannot recover, no questions available`);
-      return;
-    }
+  // Double-check we have a valid question
+  if (!room.triviaQuestions || !room.triviaQuestions[room.currentQuestionIndex]) {
+    console.error(`[nextTriviaQuestion] Room ${roomId} - No valid question at index ${room.currentQuestionIndex}`);
+    return;
   }
   
   const currentQuestion = room.triviaQuestions[room.currentQuestionIndex];
@@ -965,6 +983,66 @@ function nextTriviaQuestion(roomId) {
       }
     }
   }, 1000);
+}
+
+async function backgroundRegenerateQuestionsForRoom(roomId) {
+  const room = activeRooms[roomId];
+  if (!room) return;
+  
+  // Only start regenerating if we're not already doing so
+  if (room.isRegeneratingQuestions) {
+    console.log(`[backgroundRegenerateQuestionsForRoom] Already regenerating questions for room ${roomId}`);
+    return;
+  }
+  
+  room.isRegeneratingQuestions = true;
+  console.log(`[backgroundRegenerateQuestionsForRoom] Starting background regeneration for room ${roomId}`);
+  
+  try {
+    // Generate new questions
+    const newQuestions = await generateTriviaQuestions(
+      room.triviaCategory,
+      5, // or however many you want in each batch
+      room.triviaDifficulty
+    );
+    
+    // Check if room still exists
+    if (!activeRooms[roomId]) {
+      console.log(`[backgroundRegenerateQuestionsForRoom] Room ${roomId} no longer exists`);
+      return;
+    }
+    
+    // Apply the room's time limit to all questions
+    newQuestions.forEach(question => {
+      question.timeLimit = room.triviaTimeLimit;
+    });
+    
+    // Store as the next batch
+    room.nextBatchQuestions = newQuestions;
+    room.isRegeneratingQuestions = false;
+    
+    console.log(`[backgroundRegenerateQuestionsForRoom] Successfully generated next batch for room ${roomId}`);
+  } catch (error) {
+    console.error(`[backgroundRegenerateQuestionsForRoom] Error regenerating questions for room ${roomId}:`, error);
+    
+    // If we hit an error, still make sure to reset the flag
+    if (activeRooms[roomId]) {
+      activeRooms[roomId].isRegeneratingQuestions = false;
+    }
+    
+    // Use fallback questions
+    const fallbackQuestions = getPredefinedTriviaQuestions('general');
+    
+    // Apply the time limit to fallback questions
+    fallbackQuestions.forEach(question => {
+      question.timeLimit = room.triviaTimeLimit;
+    });
+    
+    // Store as the next batch
+    if (activeRooms[roomId]) {
+      activeRooms[roomId].nextBatchQuestions = fallbackQuestions;
+    }
+  }
 }
 
 async function regenerateQuestionsForRoom(roomId) {
