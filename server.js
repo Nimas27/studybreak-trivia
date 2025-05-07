@@ -70,9 +70,13 @@ io.on('connection', (socket) => {
       playTrivia: data.playTrivia !== undefined ? data.playTrivia : true, 
       triviaDifficulty: data.triviaDifficulty || 'medium', 
       lastTriviaCategory: data.triviaCategory || 'General Knowledge',
-      hasHadFirstTriviaRound: false, // Track first round
-      resumingFromInactivity: false  // IMPORTANT: Initialize this property
+      hasHadFirstTriviaRound: false,
+      triviaTimeLimit: data.triviaTimeLimit || 10, // Store the custom time limit
+      resumingFromInactivity: false,
+      questionInterval: null
     };
+    
+    console.log(`Creating room with trivia time limit: ${room.triviaTimeLimit} seconds`);
     
     activeRooms[roomId] = room;
     socket.join(roomId);
@@ -336,10 +340,10 @@ io.on('connection', (socket) => {
   // Topic selection
   // In server.js - Improve the select-topic handler
 socket.on('select-topic', async (data) => {
-  const { roomId, topic, difficulty } = data;
+  const { roomId, topic, difficulty, timeLimit } = data;
   const room = activeRooms[roomId];
   
-  console.log(`Received select-topic: roomId=${roomId}, topic=${topic}, difficulty=${difficulty}`);
+  console.log(`Received select-topic: roomId=${roomId}, topic=${topic}, difficulty=${difficulty}, timeLimit=${timeLimit}`);
   
   if (!room) {
     console.log(`Room ${roomId} not found for topic selection`);
@@ -351,11 +355,17 @@ socket.on('select-topic', async (data) => {
     return;
   }
   
-  console.log(`User selected new topic: ${topic}, difficulty: ${difficulty}`);
+  console.log(`User selected new topic: ${topic}, difficulty: ${difficulty}, timeLimit: ${timeLimit}`);
   
   room.triviaCategory = topic;
   room.lastTriviaCategory = topic;
   room.triviaDifficulty = difficulty || 'medium';
+  
+  // Update the trivia time limit if provided
+  if (timeLimit && !isNaN(timeLimit)) {
+    room.triviaTimeLimit = timeLimit;
+    console.log(`Updated trivia time limit to ${room.triviaTimeLimit} seconds`);
+  }
   
   // Reset question index
   room.currentQuestionIndex = -1;
@@ -368,6 +378,11 @@ socket.on('select-topic', async (data) => {
     // Use AI to generate questions
     room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
     console.log(`Generated ${room.triviaQuestions.length} questions successfully`);
+    
+    // Apply custom time limit to all questions
+    room.triviaQuestions.forEach(question => {
+      question.timeLimit = room.triviaTimeLimit;
+    });
     
     // Notify clients that questions are ready
     io.to(roomId).emit('trivia-loading', false);
@@ -382,6 +397,11 @@ socket.on('select-topic', async (data) => {
     // Fallback to predefined questions if AI generation fails
     console.log("Using fallback predefined questions");
     room.triviaQuestions = getPredefinedTriviaQuestions('general');
+    
+    // Apply custom time limit to fallback questions
+    room.triviaQuestions.forEach(question => {
+      question.timeLimit = room.triviaTimeLimit;
+    });
     
     io.to(roomId).emit('trivia-loading', false);
     
@@ -589,7 +609,7 @@ async function startTriviaSession(roomId) {
   const room = activeRooms[roomId];
   if (!room) return;
   
-  console.log(`Starting trivia session for room ${roomId}. Trivia enabled: ${room.playTrivia}, First run: ${!room.hasHadFirstTriviaRound}`);
+  console.log(`Starting trivia session for room ${roomId}. Trivia enabled: ${room.playTrivia}, First run: ${!room.hasHadFirstTriviaRound}, timeLimit: ${room.triviaTimeLimit}s`);
   
   // Set the end time for the break
   room.breakEndTime = Date.now() + (room.settings.breakTime * 1000);
@@ -615,6 +635,7 @@ async function startTriviaSession(roomId) {
   room.currentQuestionIndex = -1;
   room.inactivityCount = 0;
   room.triviaPaused = false;
+  room.resumingFromInactivity = false;
   room.pendingAnswers = [];
   
   // Reset all participants' scores for this session
@@ -629,7 +650,7 @@ async function startTriviaSession(roomId) {
     score: p.score
   })));
   
-  // Check if this is the first trivia session (set a flag on the room to track this)
+  // Check if this is the first trivia session
   if (!room.hasHadFirstTriviaRound) {
     console.log(`First trivia session for room ${roomId}, using default category without topic selection`);
     
@@ -641,8 +662,13 @@ async function startTriviaSession(roomId) {
     
     try {
       // Generate questions directly without asking for topic selection
-      console.log(`Generating initial trivia for category: ${room.triviaCategory}`);
+      console.log(`Generating initial trivia for category: ${room.triviaCategory}, time limit: ${room.triviaTimeLimit}s`);
       room.triviaQuestions = await generateTriviaQuestions(room.triviaCategory, 5, room.triviaDifficulty);
+      
+      // Apply custom time limit to all questions
+      room.triviaQuestions.forEach(question => {
+        question.timeLimit = room.triviaTimeLimit;
+      });
       
       // Save the last category
       room.lastTriviaCategory = room.triviaCategory;
@@ -660,6 +686,11 @@ async function startTriviaSession(roomId) {
       // Use fallback questions
       room.triviaQuestions = getPredefinedTriviaQuestions('general');
       
+      // Apply custom time limit to fallback questions
+      room.triviaQuestions.forEach(question => {
+        question.timeLimit = room.triviaTimeLimit;
+      });
+      
       io.to(roomId).emit('trivia-loading', false);
       
       // Start with fallback questions
@@ -669,12 +700,13 @@ async function startTriviaSession(roomId) {
     }
   } else {
     // Not the first session, show topic selection
-    console.log(`Sending category selection prompt. Last category: ${room.lastTriviaCategory}`);
+    console.log(`Sending category selection prompt. Last category: ${room.lastTriviaCategory}, timeLimit: ${room.triviaTimeLimit}`);
     
     // Send prompt to select/confirm trivia category
     io.to(roomId).emit('select-category', {
       lastCategory: room.lastTriviaCategory,
-      difficulty: room.triviaDifficulty
+      difficulty: room.triviaDifficulty,
+      timeLimit: room.triviaTimeLimit
     });
   }
 }
@@ -696,7 +728,7 @@ function nextTriviaQuestion(roomId) {
   console.log(`[nextTriviaQuestion] Room ${roomId} - Starting next question logic`);
   console.log(`Current question index: ${room.currentQuestionIndex}, total questions: ${room.triviaQuestions?.length || 0}`);
   console.log(`Is paused due to inactivity: ${room.triviaPaused}`);
-  console.log(`Is resuming from inactivity: ${room.resumingFromInactivity}`);
+  console.log(`Time limit per question: ${room.triviaTimeLimit}s`);
   
   // Check if the break time is over
   if (room.breakEndTime && Date.now() >= room.breakEndTime) {
@@ -808,10 +840,11 @@ function nextTriviaQuestion(roomId) {
       options: currentQuestion.options,
       correctIndex: null // Don't send the correct answer yet
     },
-    timeLimit: currentQuestion.timeLimit
+    timeLimit: currentQuestion.timeLimit || room.triviaTimeLimit
   });
   
-  let questionTimer = currentQuestion.timeLimit;
+  // Use the question's time limit (which should match room.triviaTimeLimit)
+  let questionTimer = currentQuestion.timeLimit || room.triviaTimeLimit;
   
   // Start question timer
   const questionInterval = setInterval(() => {
@@ -1007,7 +1040,7 @@ function cleanupRoomTimers(roomId) {
 }
 
 // Get predefined trivia questions for fallback
-function getPredefinedTriviaQuestions(category, count = 5) {
+function getPredefinedTriviaQuestions(category, count = 5, timeLimit = 10) {
   const generalKnowledge = [
     {
       id: uuidv4(),
@@ -1087,6 +1120,11 @@ function getPredefinedTriviaQuestions(category, count = 5) {
   // Select appropriate question set
   let questions = category === 'general' ? generalKnowledge : popCulture;
   
+  // Apply custom time limit if provided
+  if (timeLimit && timeLimit !== 10) {
+    questions = questions.map(q => ({...q, timeLimit: timeLimit}));
+  }
+
   // Return requested number of questions
   return questions.slice(0, count);
 }
