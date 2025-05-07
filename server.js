@@ -728,7 +728,6 @@ function nextTriviaQuestion(roomId) {
   console.log(`[nextTriviaQuestion] Room ${roomId} - Starting next question logic`);
   console.log(`Current question index: ${room.currentQuestionIndex}, total questions: ${room.triviaQuestions?.length || 0}`);
   console.log(`Is paused due to inactivity: ${room.triviaPaused}`);
-  console.log(`Time limit per question: ${room.triviaTimeLimit}s`);
   
   // Check if the break time is over
   if (room.breakEndTime && Date.now() >= room.breakEndTime) {
@@ -753,7 +752,50 @@ function nextTriviaQuestion(roomId) {
     
     return;
   }
+  if (room.currentQuestionIndex >= room.triviaQuestions.length - 1) {
+    console.log(`[nextTriviaQuestion] Room ${roomId} - Used all questions, generating new ones`);
+    
+    // Check if there's still reasonable time left in the break (at least 20 seconds)
+    const timeLeft = Math.max(0, Math.floor((room.breakEndTime - Date.now()) / 1000));
+    
+    if (timeLeft >= 20) {
+      // Show a message that we're loading more questions
+      io.to(roomId).emit('trivia-message', {
+        type: 'info',
+        message: 'Loading new questions...'
+      });
+      
+      // Generate new questions
+      regenerateQuestionsForRoom(roomId);
+      return; // Exit this function; it will be called again after new questions are ready
+    } else {
+      // If not much time left, just end the trivia session
+      console.log(`[nextTriviaQuestion] Room ${roomId} - Not enough time left for new questions`);
+      
+      io.to(roomId).emit('trivia-message', {
+        type: 'info',
+        message: 'Break time is almost over, returning to study mode'
+      });
+      
+      endTriviaSession(roomId);
+      
+      // Switch back to study mode
+      room.currentMode = 'study';
+      room.timerValue = room.settings.studyTime;
+      
+      io.to(roomId).emit('mode-changed', room.currentMode);
+      io.to(roomId).emit('timer-update', {
+        timeLeft: room.timerValue,
+        isRunning: false
+      });
+      
+      return;
+    }
+  }
   
+  // Increment the question index now that we know we have enough questions
+  room.currentQuestionIndex++;
+
   // Check for consecutive inactivity - skip this check if we're resuming from inactivity
   if (room.inactivityCount >= 2 && !room.resumingFromInactivity) {
     console.log(`[nextTriviaQuestion] Room ${roomId} - Detected inactivity (count: ${room.inactivityCount}), pausing trivia questions`);
@@ -923,6 +965,68 @@ function nextTriviaQuestion(roomId) {
       }
     }
   }, 1000);
+}
+
+async function regenerateQuestionsForRoom(roomId) {
+  const room = activeRooms[roomId];
+  if (!room) return;
+  
+  // Mark that we're loading questions
+  io.to(roomId).emit('trivia-loading', true);
+  
+  try {
+    console.log(`Regenerating trivia for room ${roomId}, category: ${room.triviaCategory}`);
+    
+    // Get new questions
+    const newQuestions = await generateTriviaQuestions(
+      room.triviaCategory,
+      5, // Request 5 new questions
+      room.triviaDifficulty
+    );
+    
+    // Apply the room's time limit to all questions
+    newQuestions.forEach(question => {
+      question.timeLimit = room.triviaTimeLimit;
+    });
+    
+    // Reset the question index and update questions
+    room.currentQuestionIndex = -1; // Will be incremented to 0 in nextTriviaQuestion
+    room.triviaQuestions = newQuestions;
+    
+    // Let clients know questions are ready
+    io.to(roomId).emit('trivia-loading', false);
+    
+    // Start with the first question
+    setTimeout(() => {
+      nextTriviaQuestion(roomId);
+    }, 1500);
+    
+  } catch (error) {
+    console.error("Error regenerating trivia questions:", error);
+    
+    // Use fallback questions as a safety measure
+    room.triviaQuestions = getPredefinedTriviaQuestions('general');
+    room.triviaQuestions.forEach(question => {
+      question.timeLimit = room.triviaTimeLimit;
+    });
+    
+    // Reset question index
+    room.currentQuestionIndex = -1;
+    
+    // Let clients know questions are ready
+    io.to(roomId).emit('trivia-loading', false);
+    
+    // Show error message
+    io.to(roomId).emit('trivia-message', {
+      type: 'error',
+      message: 'Could not load new questions. Using general knowledge questions instead.'
+    });
+    
+    // Start with the first fallback question
+    setTimeout(() => {
+      nextTriviaQuestion(roomId);
+    }, 1500);
+  }
 }
 
 // End a trivia session

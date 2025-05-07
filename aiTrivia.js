@@ -30,13 +30,12 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
       messages: [
         {
           role: "system",
-          content: "You are a helpful assistant that generates trivia questions."
+          content: "You are a helpful assistant that generates unique trivia questions. Vary the types of questions you ask."
         },
         {
           role: "user",
-          content: `Generate ${count} ${difficulty}-level multiple-choice trivia questions about ${topic}. 
-                   For easy questions, use common knowledge. For medium questions, include some specific details.
-                   For hard questions, include obscure facts and challenging content.
+          content: `Generate ${count} unique ${difficulty}-level multiple-choice trivia questions about ${topic}. 
+                   For each new set of questions, cover different aspects than previously asked questions.
                    Each question should have 4 options with only one correct answer.
                    Format your response as a JSON object with a 'questions' field containing an array of question objects.
                    Each question object should have these fields:
@@ -47,8 +46,10 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
                    - timeLimit: time limit in seconds (10)`
         }
       ],
-      response_format: { type: "json_object" }
+      response_format: { type: "json_object" },
+      temperature: 0.9 // Higher temperature for more variety
     });
+
 
     console.log("Received response from OpenAI");
     
