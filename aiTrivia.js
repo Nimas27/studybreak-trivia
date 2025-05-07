@@ -15,9 +15,8 @@ const openai = new OpenAI({
  * @returns {Array} - Array of question objects
  */
 // In aiTrivia.js - Enhance error handling and debugging
-async function generateTriviaQuestions(topic, count = 10, difficulty = 'medium') {
+async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') {
   try {
-    // Request more questions than needed to have variety (10 instead of 5)
     console.log(`Starting AI generation for ${count} ${difficulty} trivia questions on topic: ${topic}`);
     
     // Check if API key is available
@@ -31,12 +30,11 @@ async function generateTriviaQuestions(topic, count = 10, difficulty = 'medium')
       messages: [
         {
           role: "system",
-          content: "You are a helpful assistant that generates unique trivia questions."
+          content: "You are a helpful assistant that generates trivia questions."
         },
         {
           role: "user",
           content: `Generate ${count} ${difficulty}-level multiple-choice trivia questions about ${topic}. 
-                   Ensure the questions are varied and cover different aspects of the topic.
                    For easy questions, use common knowledge. For medium questions, include some specific details.
                    For hard questions, include obscure facts and challenging content.
                    Each question should have 4 options with only one correct answer.
@@ -49,8 +47,7 @@ async function generateTriviaQuestions(topic, count = 10, difficulty = 'medium')
                    - timeLimit: time limit in seconds (10)`
         }
       ],
-      response_format: { type: "json_object" },
-      temperature: 0.9 // Add higher temperature for more variety
+      response_format: { type: "json_object" }
     });
 
     console.log("Received response from OpenAI");
@@ -107,12 +104,10 @@ async function generateTriviaQuestions(topic, count = 10, difficulty = 'medium')
     const questionsWithUuid = data.questions.map(question => ({
       ...question,
       id: uuidv4(), // Replace the numeric id with a UUID
-      timeLimit: 10, // Ensure timeLimit is 10 seconds
-      generatedAt: Date.now() // Add timestamp to track when question was generated
+      timeLimit: 10 // Ensure timeLimit is 10 seconds
     }));
     
-    // Shuffle the array for more randomness
-    return shuffleArray(questionsWithUuid);
+    return questionsWithUuid;
   } catch (error) {
     console.error("Error generating trivia questions:", error);
     console.error("Stack trace:", error.stack);
@@ -120,18 +115,6 @@ async function generateTriviaQuestions(topic, count = 10, difficulty = 'medium')
     return getFallbackTriviaQuestions(difficulty);
   }
 }
-
-
-function shuffleArray(array) {
-  const shuffled = [...array];
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  return shuffled;
-}
-
-
 
 /**
  * Fallback questions in case AI generation fails
@@ -178,79 +161,6 @@ function getFallbackTriviaQuestions(difficulty = 'medium') {
     }
   ];
   
-  const generalKnowledge = [
-    {
-      id: uuidv4(),
-      text: "Which gas do plants absorb from the atmosphere?",
-      options: ["Oxygen", "Carbon Dioxide", "Nitrogen", "Hydrogen"],
-      correctIndex: 1,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "Who wrote the play 'Hamlet'?",
-      options: ["Charles Dickens", "William Shakespeare", "Jane Austen", "Leo Tolstoy"],
-      correctIndex: 1,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "What is the largest desert in the world?",
-      options: ["Sahara", "Arabian", "Antarctic", "Gobi"],
-      correctIndex: 2,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "What is the capital of Canada?",
-      options: ["Toronto", "Vancouver", "Montreal", "Ottawa"],
-      correctIndex: 3,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "What is the currency of Japan?",
-      options: ["Yuan", "Won", "Yen", "Ringgit"],
-      correctIndex: 2,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "Which is the smallest bone in the human body?",
-      options: ["Stapes", "Femur", "Radius", "Tibia"],
-      correctIndex: 0,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "Which planet has the most moons?",
-      options: ["Jupiter", "Saturn", "Uranus", "Neptune"],
-      correctIndex: 1,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "What is the hardest natural substance on Earth?",
-      options: ["Platinum", "Gold", "Diamond", "Steel"],
-      correctIndex: 2,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "Who invented the telephone?",
-      options: ["Thomas Edison", "Alexander Graham Bell", "Nikola Tesla", "Albert Einstein"],
-      correctIndex: 1,
-      timeLimit: 10
-    },
-    {
-      id: uuidv4(),
-      text: "What is the boiling point of water at sea level?",
-      options: ["90°C", "100°C", "110°C", "120°C"],
-      correctIndex: 1,
-      timeLimit: 10
-    }
-  ]
-
   // Medium questions
   const mediumQuestions = [
     {
