@@ -17,31 +17,56 @@ const openai = new OpenAI({
  */
 async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium', useNotes = false) {
   try {
-    console.log(`Starting AI generation for ${count} ${difficulty} trivia questions ${useNotes ? 'from notes' : `on topic: ${topic}`}`);
+    console.log(`Starting AI generation for ${count} ${difficulty} trivia questions on ${useNotes ? 'study notes' : 'topic'}: ${topic.substring(0, 100)}...`);
     
     if (!process.env.OPENAI_API_KEY) {
       console.warn("No OpenAI API key found, using fallback questions");
       return getFallbackTriviaQuestions(difficulty);
     }
 
-    const promptContent = useNotes ? 
-      `Create ${count} unique ${difficulty}-level multiple-choice questions based on these study notes:\n\n${topic}\n\nEnsure questions test understanding of the material.` :
-      `Generate ${count} unique ${difficulty}-level multiple-choice questions about ${topic}.\nFor each new set of questions, cover different aspects than previously asked questions.`;
-    
+    let prompt;
+    if (useNotes) {
+      prompt = `Generate ${count} unique ${difficulty}-level multiple-choice questions based on these study notes: 
+               
+               ${topic}
+               
+               Create questions that test understanding of key concepts from these notes.
+               For each question:
+               1. Focus on important information from the notes
+               2. Create plausible but incorrect options that might trick someone who only partially understood the material
+               3. Make sure the correct answer is clearly supported by the notes
+               
+               Format your response as a JSON object with a 'questions' field containing an array of question objects.`;
+    } else {
+      prompt = `Generate ${count} unique ${difficulty}-level multiple-choice trivia questions about ${topic}.
+               For each new set of questions, cover different aspects than previously asked questions.
+               Each question should have 4 options with only one correct answer.
+               Format your response as a JSON object with a 'questions' field containing an array of question objects.`;
+    }
+
+    prompt += `Each question object should have these fields:
+              - id: a unique number for each question (1, 2, 3, etc.)
+              - text: the question text
+              - options: array of 4 possible answers as strings
+              - correctIndex: index of the correct answer (0-3)
+              - timeLimit: time limit in seconds (10)`;
+
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
         {
           role: "system",
-          content: "You are a helpful assistant that generates unique trivia questions. Generate questions that test understanding and knowledge."
+          content: useNotes 
+            ? "You are an expert at creating educational assessment questions from study materials."
+            : "You are a helpful assistant that generates unique trivia questions. Vary the types of questions you ask."
         },
         {
           role: "user",
-          content: `${promptContent}\nEach question should have 4 options with only one correct answer.\nFormat your response as a JSON object with a 'questions' field containing an array of question objects.\nEach question object should have:\n- id: a unique number for each question (1, 2, 3, etc.)\n- text: the question text\n- options: array of 4 possible answers as strings\n- correctIndex: index of the correct answer (0-3)\n- timeLimit: time limit in seconds (10)`
+          content: prompt
         }
       ],
       response_format: { type: "json_object" },
-      temperature: useNotes ? 0.3 : 0.9 // Lower temperature for notes to ensure accuracy
+      temperature: useNotes ? 0.3 : 0.9 // Lower temperature for study notes to ensure accuracy
     });
 
     console.log("Received response from OpenAI");

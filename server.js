@@ -7,6 +7,9 @@ const { v4: uuidv4 } = require('uuid');
 const { generateTriviaQuestions } = require('./aiTrivia');
 require('dotenv').config();
 
+// Temporary storage for files before room creation
+const tempFiles = new Map();
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -14,6 +17,34 @@ app.use(fileUpload({
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max file size
   createParentPath: true
 }));
+
+// Temporary file upload endpoint
+app.post('/api/upload-notes-temp', async (req, res) => {
+  try {
+    if (!req.files || !req.files.notes) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const file = req.files.notes;
+    const fileId = uuidv4();
+    
+    // Store file content temporarily
+    tempFiles.set(fileId, file.data.toString('utf8'));
+    
+    // Set a timeout to clean up the file after 5 minutes
+    setTimeout(() => {
+      if (tempFiles.has(fileId)) {
+        tempFiles.delete(fileId);
+        console.log(`Cleaned up unused temp file: ${fileId}`);
+      }
+    }, 5 * 60 * 1000);
+    
+    res.status(200).json({ fileId });
+  } catch (error) {
+    console.error('Error handling temporary file upload:', error);
+    res.status(500).json({ error: 'Server error processing file' });
+  }
+});
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -80,8 +111,15 @@ io.on('connection', (socket) => {
       resumingFromInactivity: false,
       questionInterval: null,
       nextBatchQuestions: null,        // Store the next batch of questions
-      isRegeneratingQuestions: false  // Flag to track background regeneration
+      isRegeneratingQuestions: false,  // Flag to track background regeneration
+      studyNotesContent: data.fileId ? tempFiles.get(data.fileId) : null,
+      isUsingNotes: !!data.fileId
     };
+    
+    // If this was created with a file, clean up the temporary storage
+    if (data.fileId && tempFiles.has(data.fileId)) {
+      tempFiles.delete(data.fileId);
+    }
     
     console.log(`Creating room with trivia time limit: ${room.triviaTimeLimit} seconds`);
     
