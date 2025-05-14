@@ -9,51 +9,43 @@ const openai = new OpenAI({
 
 /**
  * Generate trivia questions using OpenAI
- * @param {string} topic - The topic for trivia questions
+ * @param {string} topic - The topic for trivia questions or study notes content
  * @param {number} count - Number of questions to generate
  * @param {string} difficulty - Difficulty level (easy, medium, hard)
+ * @param {boolean} useNotes - Whether to generate questions from study notes
  * @returns {Array} - Array of question objects
  */
-// In aiTrivia.js - Enhance error handling and debugging
-async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') {
+async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium', useNotes = false) {
   try {
-    console.log(`Starting AI generation for ${count} ${difficulty} trivia questions on topic: ${topic}`);
+    console.log(`Starting AI generation for ${count} ${difficulty} trivia questions ${useNotes ? 'from notes' : `on topic: ${topic}`}`);
     
-    // Check if API key is available
     if (!process.env.OPENAI_API_KEY) {
       console.warn("No OpenAI API key found, using fallback questions");
       return getFallbackTriviaQuestions(difficulty);
     }
+
+    const promptContent = useNotes ? 
+      `Create ${count} unique ${difficulty}-level multiple-choice questions based on these study notes:\n\n${topic}\n\nEnsure questions test understanding of the material.` :
+      `Generate ${count} unique ${difficulty}-level multiple-choice questions about ${topic}.\nFor each new set of questions, cover different aspects than previously asked questions.`;
     
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
         {
           role: "system",
-          content: "You are a helpful assistant that generates unique trivia questions. Vary the types of questions you ask."
+          content: "You are a helpful assistant that generates unique trivia questions. Generate questions that test understanding and knowledge."
         },
         {
           role: "user",
-          content: `Generate ${count} unique ${difficulty}-level multiple-choice trivia questions about ${topic}. 
-                   For each new set of questions, cover different aspects than previously asked questions.
-                   Each question should have 4 options with only one correct answer.
-                   Format your response as a JSON object with a 'questions' field containing an array of question objects.
-                   Each question object should have these fields:
-                   - id: a unique number for each question (1, 2, 3, etc.)
-                   - text: the question text
-                   - options: array of 4 possible answers as strings
-                   - correctIndex: index of the correct answer (0-3)
-                   - timeLimit: time limit in seconds (10)`
+          content: `${promptContent}\nEach question should have 4 options with only one correct answer.\nFormat your response as a JSON object with a 'questions' field containing an array of question objects.\nEach question object should have:\n- id: a unique number for each question (1, 2, 3, etc.)\n- text: the question text\n- options: array of 4 possible answers as strings\n- correctIndex: index of the correct answer (0-3)\n- timeLimit: time limit in seconds (10)`
         }
       ],
       response_format: { type: "json_object" },
-      temperature: 0.9 // Higher temperature for more variety
+      temperature: useNotes ? 0.3 : 0.9 // Lower temperature for notes to ensure accuracy
     });
-
 
     console.log("Received response from OpenAI");
     
-    // Debug the raw response content
     const responseContent = response.choices[0].message.content;
     console.log("Response content preview:", responseContent.substring(0, 100) + "...");
     
@@ -61,30 +53,20 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
     try {
       data = JSON.parse(responseContent);
       console.log("Parsed JSON successfully");
-      console.log("Data structure:", Object.keys(data));
     } catch (parseError) {
       console.error("Error parsing JSON:", parseError);
       console.error("Full response:", responseContent);
       throw new Error("Failed to parse response from OpenAI");
     }
     
-    // Check if the response has the expected structure
     if (!data.questions) {
       console.error("Response doesn't contain 'questions' field:", data);
-      
-      // Try to adapt to different structures
-      if (data.trivia_questions) {
-        console.log("Found 'trivia_questions' field instead of 'questions'");
-        data.questions = data.trivia_questions;
+      const possibleQuestionArray = Object.values(data).find(val => Array.isArray(val));
+      if (possibleQuestionArray) {
+        console.log("Found an array in response, using as questions");
+        data.questions = possibleQuestionArray;
       } else {
-        // Create questions from any array we find in the response
-        const possibleQuestionArray = Object.values(data).find(val => Array.isArray(val));
-        if (possibleQuestionArray) {
-          console.log("Found an array in response, using as questions");
-          data.questions = possibleQuestionArray;
-        } else {
-          throw new Error("Response doesn't contain a questions array");
-        }
+        throw new Error("Response doesn't contain a questions array");
       }
     }
     
@@ -101,18 +83,16 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium') 
     console.log("Successfully found questions array with length:", data.questions.length);
     console.log("First question preview:", data.questions[0].text.substring(0, 30) + "...");
     
-    // Add UUID to each question and ensure timeLimit is 10 seconds
     const questionsWithUuid = data.questions.map(question => ({
       ...question,
-      id: uuidv4(), // Replace the numeric id with a UUID
-      timeLimit: 10 // Ensure timeLimit is 10 seconds
+      id: uuidv4(),
+      timeLimit: 10
     }));
     
     return questionsWithUuid;
   } catch (error) {
     console.error("Error generating trivia questions:", error);
     console.error("Stack trace:", error.stack);
-    // Return fallback questions in case of error
     return getFallbackTriviaQuestions(difficulty);
   }
 }

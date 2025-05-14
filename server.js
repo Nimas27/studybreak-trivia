@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const fileUpload = require('express-fileupload');
 const { v4: uuidv4 } = require('uuid');
 const { generateTriviaQuestions } = require('./aiTrivia');
 require('dotenv').config();
@@ -9,6 +10,10 @@ require('dotenv').config();
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(fileUpload({
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max file size
+  createParentPath: true
+}));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -413,6 +418,79 @@ socket.on('select-topic', async (data) => {
     }, 2000);
   }
 });
+
+  // Topic selection
+  socket.on('select-topic', async ({ roomId, topic, difficulty, timeLimit, useNotes = false }) => {
+    const room = activeRooms[roomId];
+    
+    if (!room) {
+      console.log(`Room ${roomId} not found for topic selection`);
+      return;
+    }
+    
+    if (room.currentMode !== 'trivia') {
+      console.log(`Room ${roomId} is not in trivia mode, ignoring topic selection`);
+      return;
+    }
+
+    const topicContent = useNotes ? room.studyNotes || topic : topic;
+    console.log(`User selected ${useNotes ? 'notes-based questions' : `new topic: ${topic}`}, difficulty: ${difficulty}, timeLimit: ${timeLimit}`);
+    
+    room.triviaCategory = topic;
+    room.lastTriviaCategory = topic;
+    room.triviaDifficulty = difficulty || 'medium';
+    room.isUsingNotes = useNotes;
+    
+    // Update the trivia time limit if provided
+    if (timeLimit && !isNaN(timeLimit)) {
+      room.triviaTimeLimit = timeLimit;
+      console.log(`Updated trivia time limit to ${room.triviaTimeLimit} seconds`);
+    }
+    
+    // Reset question index
+    room.currentQuestionIndex = -1;
+    
+    // Notify clients that we're loading questions
+    io.to(roomId).emit('trivia-loading', true);
+    
+    try {
+      console.log(`Generating trivia for ${useNotes ? 'notes' : `category: ${room.triviaCategory}`}, difficulty: ${room.triviaDifficulty}`);
+      // Use AI to generate questions
+      room.triviaQuestions = await generateTriviaQuestions(topicContent, 5, room.triviaDifficulty, useNotes);
+      console.log(`Generated ${room.triviaQuestions.length} questions successfully`);
+      
+      // Apply custom time limit to all questions
+      room.triviaQuestions.forEach(question => {
+        question.timeLimit = room.triviaTimeLimit;
+      });
+      
+      // Notify clients that questions are ready
+      io.to(roomId).emit('trivia-loading', false);
+      
+      // Start the first question after a short delay
+      setTimeout(() => {
+        nextTriviaQuestion(roomId);
+      }, 2000);
+    } catch (error) {
+      console.error("Error generating trivia questions:", error);
+      
+      // Fallback to predefined questions if AI generation fails
+      console.log("Using fallback predefined questions");
+      room.triviaQuestions = getPredefinedTriviaQuestions('general');
+      
+      // Apply custom time limit to fallback questions
+      room.triviaQuestions.forEach(question => {
+        question.timeLimit = room.triviaTimeLimit;
+      });
+      
+      io.to(roomId).emit('trivia-loading', false);
+      
+      // Start with predefined questions
+      setTimeout(() => {
+        nextTriviaQuestion(roomId);
+      }, 2000);
+    }
+  });
   
   // Answer submission
   // Replace the submit-answer event handler with this improved version
@@ -1310,6 +1388,30 @@ function getPredefinedTriviaQuestions(category, count = 5, timeLimit = 10) {
   // Return requested number of questions
   return questions.slice(0, count);
 }
+
+// File upload endpoint
+app.post('/api/upload-notes', async (req, res) => {
+  try {
+    if (!req.files || !req.files.notes) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const file = req.files.notes;
+    const roomId = req.body.roomId;
+    
+    if (!roomId || !activeRooms[roomId]) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    // Store the notes content in the room
+    activeRooms[roomId].studyNotes = file.data.toString('utf8');
+    
+    res.status(200).json({ message: 'File uploaded successfully' });
+  } catch (error) {
+    console.error('Error handling file upload:', error);
+    res.status(500).json({ error: 'Server error processing file' });
+  }
+});
 
 // Basic route for checking server status
 app.get('/', (req, res) => {
