@@ -26,17 +26,21 @@ async function generateTriviaQuestions(topic, count = 5, difficulty = 'medium', 
 
     let prompt;
     if (useNotes) {
-      prompt = `Generate ${count} unique ${difficulty}-level multiple-choice questions based on these study notes: 
-               
+      prompt = `Generate ${count} unique ${difficulty}-level multiple-choice questions based on these study notes.
+               Use ONLY the provided content to create questions:
+
                ${topic}
-               
-               Create questions that test understanding of key concepts from these notes.
+
+               Create questions that test understanding of key concepts from the notes.
                For each question:
-               1. Focus on important information from the notes
-               2. Create plausible but incorrect options that might trick someone who only partially understood the material
-               3. Make sure the correct answer is clearly supported by the notes
+               1. Focus on SPECIFIC information directly stated in the notes
+               2. Create plausible but incorrect options based on content from the notes
+               3. Make sure the correct answer is explicitly supported by the notes
+               4. Do not generate questions about general topics - only use the provided content
                
-               Format your response as a JSON object with a 'questions' field containing an array of question objects.`;
+               Format your response as a JSON object with a 'questions' field containing an array of question objects.
+               
+               Questions MUST be answerable solely from the provided notes.`;
     } else {
       prompt = `Generate ${count} unique ${difficulty}-level multiple-choice trivia questions about ${topic}.
                For each new set of questions, cover different aspects than previously asked questions.

@@ -471,13 +471,14 @@ socket.on('select-topic', async (data) => {
       return;
     }
 
-    const topicContent = useNotes ? room.studyNotes || topic : topic;
-    console.log(`User selected ${useNotes ? 'notes-based questions' : `new topic: ${topic}`}, difficulty: ${difficulty}, timeLimit: ${timeLimit}`);
+    const topicContent = useNotes ? room.studyNotesContent : topic;
+    console.log(`User selected ${useNotes ? 'notes-based questions' : 'new topic'}:`, useNotes ? 'Using study notes content' : topic);
     
-    room.triviaCategory = topic;
-    room.lastTriviaCategory = topic;
+    room.triviaCategory = useNotes ? 'Study Notes' : topic;
+    room.lastTriviaCategory = room.triviaCategory;
     room.triviaDifficulty = difficulty || 'medium';
     room.isUsingNotes = useNotes;
+    room.triviaTimeLimit = timeLimit || 10;
     
     // Update the trivia time limit if provided
     if (timeLimit && !isNaN(timeLimit)) {
@@ -492,9 +493,17 @@ socket.on('select-topic', async (data) => {
     io.to(roomId).emit('trivia-loading', true);
     
     try {
-      console.log(`Generating trivia for ${useNotes ? 'notes' : `category: ${room.triviaCategory}`}, difficulty: ${room.triviaDifficulty}`);
-      // Use AI to generate questions
-      room.triviaQuestions = await generateTriviaQuestions(topicContent, 5, room.triviaDifficulty, useNotes);
+      console.log(`Generating trivia for ${room.isUsingNotes ? 'study notes' : `category: ${room.triviaCategory}`}`);
+      console.log('Topic content length:', topicContent ? topicContent.length : 0);
+      console.log('Using notes:', room.isUsingNotes);
+
+      // Use AI to generate questions with proper flags
+      room.triviaQuestions = await generateTriviaQuestions(
+        topicContent, 
+        5, 
+        room.triviaDifficulty,
+        room.isUsingNotes
+      );
       console.log(`Generated ${room.triviaQuestions.length} questions successfully`);
       
       // Apply custom time limit to all questions
@@ -1436,15 +1445,24 @@ app.post('/api/upload-notes', async (req, res) => {
 
     const file = req.files.notes;
     const roomId = req.body.roomId;
-    
+
     if (!roomId || !activeRooms[roomId]) {
       return res.status(404).json({ error: 'Room not found' });
     }
 
-    // Store the notes content in the room
-    activeRooms[roomId].studyNotes = file.data.toString('utf8');
+    // Store the file content in the room
+    const fileContent = file.data.toString('utf8');
     
-    res.status(200).json({ message: 'File uploaded successfully' });
+    // Basic validation of content
+    if (!fileContent || fileContent.trim().length < 10) {
+      return res.status(400).json({ error: 'File appears to be empty or too short' });
+    }
+
+    // Store the content in the room
+    activeRooms[roomId].studyNotesContent = fileContent;
+    console.log(`Stored ${fileContent.length} characters of notes content for room ${roomId}`);
+
+    res.status(200).json({ message: 'Notes uploaded successfully' });
   } catch (error) {
     console.error('Error handling file upload:', error);
     res.status(500).json({ error: 'Server error processing file' });
